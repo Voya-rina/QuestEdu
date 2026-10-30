@@ -1,0 +1,42 @@
+# ---- 密钥与本地配置（含 API Key / 访问码，绝不入库）----
+.env
+.env.local
+.access.json
+
+# ---- 第三方工具（cloudflared 等，体积大不入库）----
+Cloudflared/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# ---- 运行期数据 ----
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.csv
+data/*.json
+!data/.gitkeep
+
+# ---- 测试 / 工具缓存 ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---- 交付物与备份（体积大、可再生，不入库）----
+*.zip
+*.pptx
+QuestEdu大纲PPT/
+QuestEdu大纲详细版/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini

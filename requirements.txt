@@ -1,0 +1,9 @@
+# 运行时依赖（与 pyproject.toml 的 [project].dependencies 保持一致）
+fastapi>=0.110
+uvicorn[standard]>=0.27
+sympy>=1.12
+httpx>=0.26
+pydantic>=2.6
+
+# 开发依赖
+# pytest>=8.0
