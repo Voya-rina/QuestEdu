@@ -82,6 +82,27 @@ class TestModelPath(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(r["reason"], "not_found")
 
+    def test_plain_text_transcription_is_accepted(self):
+        """专用 OCR 模型（minicpm-ocr）不理 JSON 指令，直接吐纯文本转写——
+        实测它返回 `3. 求函数 \\(f(x)=|x|^{3}\\) 的导数.`，以前被误报"没认出"。"""
+        r = self._run("3. 求函数 \\(f(x)=|x|^{3}\\) 的导数.")
+        self.assertTrue(r["ok"])
+        self.assertNotIn("没认出", r.get("message", ""))
+        self.assertIn("求函数", r["latex"])
+        self.assertNotIn("\\(", r["latex"], r"\(...\) 要换成 $...$，否则前端包 $$ 会弄坏渲染")
+        self.assertIn("$f(x)=|x|^{3}$", r["latex"])
+
+    def test_short_or_refusal_plain_text_is_rejected(self):
+        r = self._run("无法识别")
+        self.assertFalse(r["ok"])
+        r = self._run("好")          # 太短，不像题面
+        self.assertFalse(r["ok"])
+
+    def test_display_delims_converted_in_json_path(self):
+        r = self._run('{"found":true,"latex":"\\\\(x^2+1\\\\)的最小值是多少"}')
+        self.assertTrue(r["ok"])
+        self.assertIn("$x^2+1$", r["latex"])
+
     def test_api_error_is_reported(self):
         r = self._run(None, raises=RuntimeError("HTTP 401 · invalid key"))
         self.assertFalse(r["ok"])

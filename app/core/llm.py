@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 
 from app.config import ENV_PATH
@@ -25,6 +26,12 @@ _cfg: dict = {}
 _last_usage: dict = {}
 _last_raw: str = ""
 _last_route: dict = {}       # 最近一次成功请求走的端点（name + model），OCR 标签用
+
+# 本地推理端点（LM Studio / llama-server / Ollama）内部是串行的：并发打过去的
+# 请求只会在它的队列里互相拖慢（日志里成串的 Client disconnected 就是这么来的）。
+# 服务端先排好队：同一时刻只放 N 个请求进本地端点，其余在外面等。
+# N 可用环境变量 LLM_LOCAL_CONCURRENCY 调（跑得动的机器可以调大）。
+_LOCAL_SEM = threading.Semaphore(max(1, int(os.environ.get("LLM_LOCAL_CONCURRENCY", "1") or 1)))
 _JSON_BLOCK = re.compile(r"\{.*\}", re.S)
 
 
@@ -239,9 +246,11 @@ def active_model() -> str:
     return rs[0]["model"] if rs else _cfg.get("model", "")
 
 
-def describe() -> dict:
+def describe(full: bool = True) -> dict:
+    """配置概况。full=False 给用户端（观众设备）：只留界面需要的最小集，
+    Key 提示 / .env 路径 / 端点地址这类配置细节只下发给控制端。"""
     vr = vision_routes()
-    return {
+    d = {
         "mode": mode(),
         "ready": available(),
         "routes": [r["name"] for r in _routes()],
@@ -261,6 +270,10 @@ def describe() -> dict:
         "local_timeout": int(_cfg.get("local_timeout", 900)),
         "env_file": str(ENV_PATH),
     }
+    if not full:
+        for k in ("base_url", "local_base_url", "key_configured", "key_hint", "env_file"):
+            d[k] = ""
+    return d
 
 
 def _vision_hint() -> str:
@@ -342,6 +355,28 @@ def _post(messages: list, temperature: float, routes: list[dict] | None = None,
 
 def _send(route: dict, messages: list, temperature: float,
           max_tokens: int | None = None) -> str:
+    """发给单个端点。本地端点先过并发闸门（见 _LOCAL_SEM），云端不排队。"""
+    if route["name"] != "local":
+        return _send_http(route, messages, temperature, max_tokens)
+    if _LOCAL_SEM.acquire(timeout=0.2):        # 空闸门：直接进，不刷日志
+        try:
+            return _send_http(route, messages, temperature, max_tokens)
+        finally:
+            _LOCAL_SEM.release()
+    log.info("本地端点忙，请求排队等待…")
+    t_q = time.time()
+    _LOCAL_SEM.acquire()
+    try:
+        waited = time.time() - t_q
+        if waited >= 1:
+            log.info("本地端点排队 %.0f 秒后轮到本请求", waited)
+        return _send_http(route, messages, temperature, max_tokens)
+    finally:
+        _LOCAL_SEM.release()
+
+
+def _send_http(route: dict, messages: list, temperature: float,
+               max_tokens: int | None = None) -> str:
     import httpx  # 延迟导入：离线模式完全不需要
 
     headers = {"Content-Type": "application/json"}

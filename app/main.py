@@ -24,7 +24,7 @@ from app.api import (
     routes_session,
     routes_ws,
 )
-from app.config import APP_NAME, VERSION, WEB_DIR
+from app.config import APP_NAME, DATA_DIR, VERSION, WEB_DIR
 from app.core.access import AccessGate
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -32,12 +32,33 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # 终端业务日志：OCR 收图/结果、每次 LLM 调用的路由与耗时、引擎判定、
 # 自评与变式，全部打到 stdout（START.cmd 的窗口里直接看），问题定位不靠猜。
+# 同时写一份到 data/questedu.log（1MB 滚动）——控制台窗口滚没了/关了也能查。
 # uvicorn 自己的 access log 照旧，两层互不干扰。
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
+def _setup_logging() -> None:
+    root = logging.getLogger()
+    if root.handlers:            # 重复导入（测试/热重载）时不叠加 handler
+        return
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                            "%H:%M:%S")
+    root.setLevel(logging.INFO)
+
+    cons = logging.StreamHandler()
+    cons.setFormatter(fmt)
+    root.addHandler(cons)
+    try:
+        from logging.handlers import RotatingFileHandler
+
+        fh = RotatingFileHandler(DATA_DIR / "questedu.log",
+                                 maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except Exception:
+        pass                     # 日志文件写不了不影响服务
+    # httpx 对每个请求都吐一行 INFO，和 uvicorn 的 access log 重复——降噪
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+_setup_logging()
 
 
 def create_app() -> FastAPI:

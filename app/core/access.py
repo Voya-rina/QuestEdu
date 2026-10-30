@@ -126,6 +126,20 @@ def demo_ip() -> str:
 
 # ---------------------------------------------------------------- 控制端识别
 
+def normalize_peer(ip: str) -> str:
+    """把 IPv4-mapped IPv6（::ffff:127.0.0.1）还原成 IPv4 写法。
+
+    服务按双栈绑在 `::` 上（见 scripts/run.py 的 dual_stack_socket），所有
+    IPv4 连接的对端地址都带 ::ffff: 前缀。不还原的话，控制端识别
+    （对端是不是本机）在 IPv4 访问下全部失效——演示者自己的电脑也会被
+    判成观众设备，设置/演示模式统统 403。实测踩过。
+    """
+    p = (ip or "").strip().lower().strip("[]")
+    if p.startswith("::ffff:") and "." in p:
+        return p[len("::ffff:"):]
+    return p
+
+
 def is_controller(peer: str, headers) -> bool:
     """这台设备是不是控制端（一对多里的"一"）。
 
@@ -142,7 +156,7 @@ def is_controller(peer: str, headers) -> bool:
     for h in _FORWARD_HEADERS:
         if headers.get(h):
             return False
-    p = (peer or "").strip().lower().strip("[]")
+    p = normalize_peer(peer)
     if p == "testclient":                  # FastAPI TestClient：单元测试视为控制端
         return True
     if p in ("127.0.0.1", "::1", "localhost"):

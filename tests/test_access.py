@@ -33,6 +33,17 @@ class TestCode(AccessCase):
         self.assertEqual(len(c), 4)
         self.assertTrue(c.isdigit())
 
+    def test_ipv4_mapped_peer_is_controller(self):
+        """双栈监听下 IPv4 对端是 ::ffff:127.0.0.1：必须还原，否则演示者
+        自己的电脑也会被判成观众设备（实测踩过）。"""
+        h = {}          # 无转发头
+        self.assertTrue(access.is_controller("::ffff:127.0.0.1", h))
+        self.assertFalse(access.is_controller("::ffff:10.9.9.9", h))
+        # 归一化本身
+        self.assertEqual(access.normalize_peer("::ffff:127.0.0.1"), "127.0.0.1")
+        self.assertEqual(access.normalize_peer("::1"), "::1")          # 真回环 v6 不动
+        self.assertEqual(access.normalize_peer("2409:8a55::1234"), "2409:8a55::1234")
+
     def test_code_is_stable(self):
         self.assertEqual(access.code(), access.code())
 

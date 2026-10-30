@@ -18,11 +18,12 @@ def _port(request: Request) -> int:
 
 
 def _client_ip(request: Request) -> str:
-    """发起请求的客户端 IP。走隧道时认 X-Forwarded-For 的第一个。"""
+    """发起请求的客户端 IP。走隧道时认 X-Forwarded-For 的第一个。
+    双栈监听下 IPv4 对端带 ::ffff: 前缀，统一还原后再比较。"""
     xff = request.headers.get("x-forwarded-for", "")
     if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else ""
+        return access.normalize_peer(xff.split(",")[0].strip())
+    return access.normalize_peer(request.client.host if request.client else "")
 
 
 def _can_unlock(request: Request) -> bool:

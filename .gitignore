@@ -3,9 +3,6 @@
 .env.local
 .access.json
 
-# ---- 第三方工具（cloudflared 等，体积大不入库）----
-Cloudflared/
-
 # ---- Python ----
 __pycache__/
 *.py[cod]
@@ -22,6 +19,9 @@ data/*.db-wal
 data/*.csv
 data/*.json
 !data/.gitkeep
+
+# log
+*.log
 
 # ---- 测试 / 工具缓存 ----
 .pytest_cache/

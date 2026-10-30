@@ -87,7 +87,7 @@ class SelfAssessmentRow(Base):
     session_id: Mapped[str] = mapped_column(String(16), ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
     step_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score: Mapped[int] = mapped_column(Integer, default=0)
-    actual: Mapped[int | None] = mapped_column(Integer, nullable=True)      # 100 / 0，由变式结果裁决
+    actual: Mapped[int | None] = mapped_column(Integer, nullable=True)      # 5 / 0（五分制），由变式结果裁决
     gap: Mapped[float | None] = mapped_column(Float, nullable=True)         # 自评 - 实际
     warned: Mapped[bool] = mapped_column(Boolean, default=False)            # 是否亮红灯
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

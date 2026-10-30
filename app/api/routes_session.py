@@ -5,13 +5,19 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.api.schemas import AnswerReq, AssessReq, CreateSessionReq
+from app.core import access
 from app.core.engine import Engine
 from app.core.store import session_lock, store
 
 router = APIRouter(prefix="/api/sessions", tags=["session"])
+
+
+def _is_controller(request: Request) -> bool:
+    peer = request.client.host if request.client else ""
+    return access.is_controller(peer, request.headers)
 
 
 @router.post("")
@@ -80,5 +86,9 @@ def answer_variant(sid: str, req: AnswerReq):
 
 
 @router.get("/{sid}/report")
-def report(sid: str):
-    return Engine.report(store.get(sid))
+def report(sid: str, request: Request):
+    data = Engine.report(store.get(sid))
+    if not _is_controller(request):
+        # 产品铁律是"标准答案只在服务端"：知道会话号的观众设备也不下发
+        data["标准答案（服务端留存，未下发）"] = None
+    return data

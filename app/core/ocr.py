@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import time
 
 from app.core import llm
@@ -18,6 +19,34 @@ log = logging.getLogger(__name__)
 
 MAX_BYTES = 8 * 1024 * 1024          # 8MB，手机直出照片通常 2~4MB
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif"}
+
+# 纯文本回退用：教材题号前缀（"3. "）、拒绝话术
+_NUM_PREFIX = re.compile(r"^\s*\d+\s*[.、)）:：]\s*")
+_REFUSAL = re.compile(r"无法识别|看不清|不能识别|抱歉|sorry|cannot", re.I)
+
+
+def _plain_transcription(raw: str) -> str:
+    """专用 OCR 模型（minicpm-ocr 等）不理会 JSON 指令，直接吐纯文本转写。
+
+    文本像一道题（有实际内容、不是拒绝话术）就整段当题面用——识别结果
+    反正要学生过目确认，宁可用上，别白白报"没认出数学题"。
+    拒绝话术 / 太短 / 太长的仍然当失败。
+    """
+    t = (raw or "").strip()
+    t = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", t).strip()   # 万一包了代码块
+    t = _NUM_PREFIX.sub("", t)                                # "3. 求函数…" → "求函数…"
+    t = re.sub(r"\s+", " ", t)
+    if not (4 <= len(t) <= 500) or _REFUSAL.search(t):
+        return ""
+    return t
+
+
+def _latex_delims(s: str) -> str:
+    """模型爱用 \\(...\\) / \\[...\\] 写行内/行间公式；统一换成 $ / $$，
+    前端 pbar 的"没有 $ 就整段包 $$"逻辑才不会把它们再包一层弄坏渲染。"""
+    s = re.sub(r"\\\((.+?)\\\)", r"$\1$", s, flags=re.S)
+    s = re.sub(r"\\\[(.+?)\\\]", r"$$\1$$", s, flags=re.S)
+    return s
 
 SYSTEM = """你是题目转写器。把图片里的数学题抄成 LaTeX，不做任何解答。
 
@@ -105,6 +134,12 @@ def extract(data: bytes, declared_mime: str | None = None) -> dict:
 
     data_json = llm.parse_json(raw) or {}
     latex = (data_json.get("latex") or "").strip()
+    if not latex and not data_json:
+        # JSON 没解析出来：专用 OCR 模型多半直接输出了纯文本转写
+        latex = _plain_transcription(raw)
+        if latex:
+            log.info("OCR 非 JSON 输出，按纯文本转写采用")
+    latex = _latex_delims(latex) if latex else latex
     if not data_json.get("found", bool(latex)) or not latex:
         log.info("OCR 未认出数学题（%dms）· 模型原话开头：%s",
                  int((time.time() - t0) * 1000), raw[:80].replace("\n", " "))

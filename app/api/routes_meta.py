@@ -42,7 +42,8 @@ def info(request: Request):
     return {
         "app": APP_NAME,
         "version": VERSION,
-        "llm": llm.describe(),
+        # 用户端可见的最小集：配置细节（Key 提示、env 路径、端点地址）不下发
+        "llm": llm.describe(full=False),
         "demo_problem": PROBLEMS[0]["latex"],
         "problems": problems_brief(),
         "lan_url": f"http://{lan_ip()}:{_port(request)}",

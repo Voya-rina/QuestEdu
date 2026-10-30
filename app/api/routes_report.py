@@ -9,27 +9,39 @@ from __future__ import annotations
 import csv
 import io
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
+from app.core import access
 from app.core.engine import Engine
 from app.core.store import store
 
 router = APIRouter(prefix="/api/reports", tags=["report"])
 
 
+def _is_controller(request: Request) -> bool:
+    peer = request.client.host if request.client else ""
+    return access.is_controller(peer, request.headers)
+
+
 @router.get("/history")
-def history(limit: int = 30, user: str = ""):
+def history(limit: int = 30, user: str = "", request: Request = None):
     """首页「学习记录」：最近会话的轻量列表。
 
     故意不走 store.get()——那条路会把每条消息都拉出来，列表页用不上。
     直接查 sessions 表，汇总字段从 JSON 列里现场算。
     传了 user 就只看这个人的：记录按用户分开，不堆在一起。
+
+    权限：非控制端必须带 user——观众设备不该有能力翻所有人的记录；
+    控制端（演示者的电脑）不带 user 时可以看到全部，便于排查。
     """
     from sqlalchemy import select
 
     from app.db import SessionLocal
     from app.models import SessionRow
+
+    if request is not None and not user.strip() and not _is_controller(request):
+        raise HTTPException(403, "学习记录按用户查询，请带上 user 参数")
 
     limit = max(1, min(100, limit))
     stmt = select(SessionRow).order_by(SessionRow.created_at.desc()).limit(limit)

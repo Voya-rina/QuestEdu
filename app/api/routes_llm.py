@@ -33,15 +33,16 @@ def _demo_guard() -> None:
 
 @router.get("")
 def status(request: Request):
-    d = llm.describe()
     controller = _is_controller(request)
+    # 配置细节（Key 提示、env 路径、端点地址）只给控制端；观众设备拿最小集
+    d = llm.describe(full=controller)
     d["controller"] = controller
     d["demo_locked"] = access.demo_mode()
     # controller=False 时前端把整个设置入口藏掉；unlockable 决定控制端上
     # 显不显示 🔒 按钮（演示中观众设备连按钮都拿不到）
     xff = request.headers.get("x-forwarded-for", "")
-    ip = xff.split(",")[0].strip() if xff else (request.client.host if request.client else "")
-    d["demo_unlockable"] = controller or ip == access.demo_ip()
+    ip = (xff.split(",")[0].strip() if xff else (request.client.host if request.client else ""))
+    d["demo_unlockable"] = controller or access.normalize_peer(ip) == access.demo_ip()
     return d
 
 

@@ -6,7 +6,11 @@ LLM 只负责"怎么说"，不负责"等于几"。
 """
 from __future__ import annotations
 
+import logging
+import os
 import re
+import threading
+
 import sympy as sp
 from sympy.parsing.sympy_parser import (
     parse_expr as _parse_expr,
@@ -15,10 +19,16 @@ from sympy.parsing.sympy_parser import (
     convert_xor,
 )
 
+log = logging.getLogger(__name__)
+
 TRANSFORMS = standard_transformations + (
     implicit_multiplication_application,
     convert_xor,
 )
+
+# 单次 SymPy 计算的等待上限（秒）。simplify / limit 碰上病态表达式可能算很久，
+# 不能让一个学生的答案把判定链路拖死。超时后放弃计算、判定退回下一层。
+_SYMPY_TIMEOUT = float(os.environ.get("SYMPY_TIMEOUT", "5") or 5)
 
 # 受限命名空间：只放数学函数，不放 __import__ / open / eval 可达的东西
 _SAFE = {
@@ -78,6 +88,32 @@ _DANGEROUS = re.compile(
 )
 
 
+def _with_timeout(fn, args=(), timeout: float | None = None):
+    """跑一段可能卡死的 SymPy 计算，超过 timeout 秒就不再等。
+
+    Python 线程杀不掉，只能"不再等"：每次起一个守护线程，超时后把它留在
+    后台自生自灭，主流程拿到 None。用完即弃（而不是共享线程池）是为了避免
+    一个卡死的任务占住池位、让后续所有提交都立刻超时的连锁反应。
+    """
+    timeout = _SYMPY_TIMEOUT if timeout is None else timeout
+    box: list = []
+
+    def run():
+        try:
+            box.append(fn(*args))
+        except Exception:
+            pass
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if box:
+        return box[0]
+    if t.is_alive():
+        log.warning("SymPy %s 超过 %s 秒未返回，已放弃", getattr(fn, "__name__", fn), timeout)
+    return None
+
+
 def number_in(text: str):
     """从一段自然语言里抽出学生给出的最终数值。
 
@@ -115,29 +151,34 @@ def number_in(text: str):
         return None
 
 
+def _same_raw(a, b, tol: float) -> bool:
+    diff = sp.simplify(sp.nsimplify(a) - sp.nsimplify(b))
+    if diff == 0:
+        return True
+    if diff.is_number:
+        return abs(complex(diff.evalf())) < tol
+    return False
+
+
 def same(a, b, tol: float = 1e-9) -> bool:
-    """判断两个数学量是否严格相等（分数走符号化简，浮点走容差）。"""
+    """判断两个数学量是否严格相等（分数走符号化简，浮点走容差）。
+
+    simplify 可能被病态输入拖死，套超时：超时按"不相等"处理。
+    """
     if a is None or b is None:
         return False
-    try:
-        diff = sp.simplify(sp.nsimplify(a) - sp.nsimplify(b))
-        if diff == 0:
-            return True
-        if diff.is_number:
-            return abs(complex(diff.evalf())) < tol
-        return False
-    except Exception:
-        return False
+    return bool(_with_timeout(_same_raw, (a, b, tol)))
+
+
+def _limit_raw(expr_str: str, var: str, point):
+    x = sp.Symbol(var)
+    expr = _parse_expr(expr_str, local_dict={**_SAFE, var: x}, transformations=TRANSFORMS)
+    return sp.limit(expr, x, point)
 
 
 def limit_of(expr_str: str, var: str = "x", point=0):
-    """符号求极限。失败返回 None。"""
-    try:
-        x = sp.Symbol(var)
-        expr = _parse_expr(expr_str, local_dict={**_SAFE, var: x}, transformations=TRANSFORMS)
-        return sp.limit(expr, x, point)
-    except Exception:
-        return None
+    """符号求极限。失败或超时返回 None。"""
+    return _with_timeout(_limit_raw, (expr_str, var, point))
 
 
 def parse_expr(s: str):
@@ -268,25 +309,30 @@ def _as_expr(s: str):
     return cands[0]
 
 
-def evaluate(expr_str: str):
-    """在受限命名空间里求值一个 SymPy 表达式，返回符号结果。
-
-    三层防护：
-      1. 字符串层面先挡掉 dunder 与动态执行关键字（`().__class__.__bases__[0]
-         .__subclasses__()` 这种遍历在纯命名空间隔离下是能跑通的）
-      2. 不给 `__builtins__`
-      3. 命名空间里只有数学对象，没有任何 import 通道
-
-    目前只用于我们自己写死的题库表达式；云端若要执行 LLM 生成的代码，
-    还得再加超时与子进程隔离（大纲第三节第 3 条）。
-    """
-    src = str(expr_str)
-    if _DANGEROUS.search(src):
-        return None
+def _evaluate_raw(src: str):
     try:
         return eval(src, {"__builtins__": {}}, dict(_EVAL_NS))
     except Exception:
         return None
+
+
+def evaluate(expr_str: str):
+    """在受限命名空间里求值一个 SymPy 表达式，返回符号结果。
+
+    四层防护：
+      1. 字符串层面先挡掉 dunder 与动态执行关键字（`().__class__.__bases__[0]
+         .__subclasses__()` 这种遍历在纯命名空间隔离下是能跑通的）
+      2. 不给 `__builtins__`
+      3. 命名空间里只有数学对象，没有任何 import 通道
+      4. 病态表达式（深层 integrate / limit）可能算不完 —— 套超时，超时返回 None
+
+    目前用于内置题库表达式与出题层预验证；若将来直接执行 LLM 生成的代码，
+    还得加子进程隔离（大纲第三节第 3 条）。
+    """
+    src = str(expr_str)
+    if _DANGEROUS.search(src):
+        return None
+    return _with_timeout(_evaluate_raw, (src,))
 
 
 def latex(expr) -> str:
