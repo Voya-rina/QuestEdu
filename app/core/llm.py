@@ -12,15 +12,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
 
 from app.config import ENV_PATH
 
+log = logging.getLogger(__name__)
+
 _cfg: dict = {}
 _last_usage: dict = {}
 _last_raw: str = ""
+_last_route: dict = {}       # 最近一次成功请求走的端点（name + model），OCR 标签用
 _JSON_BLOCK = re.compile(r"\{.*\}", re.S)
 
 
@@ -323,9 +327,11 @@ def _post(messages: list, temperature: float, routes: list[dict] | None = None,
             globals()["_last_raw"] = out
             return out
         except LLMTimeout as e:
+            log.warning("LLM %s 超时：%s", route["name"], str(e)[:120])
             errors.append(f"{route['name']} · {e}")
         except LLMError as e:
             all_timeout = False
+            log.warning("LLM %s 失败：%s", route["name"], str(e)[:160])
             errors.append(f"{route['name']} · {e}")
     msg = "; ".join(errors)
     if all_timeout:
@@ -380,7 +386,11 @@ def _send(route: dict, messages: list, temperature: float,
         raise LLMError(f"返回格式不认识：{r.text[:200]}")
     _last_usage.clear()
     _last_usage.update(body.get("usage") or {})
-    return content_of(choice)
+    globals()["_last_route"] = {"name": route["name"], "model": route["model"]}
+    out = content_of(choice)
+    log.info("LLM %s · %s · %dms · 回复 %d 字",
+             route["name"], route["model"], int((time.time() - t0) * 1000), len(out))
+    return out
 
 
 def content_of(choice: dict) -> str:
@@ -464,7 +474,9 @@ def chat_json(system: str, user: str, retries: int | None = None,
     所以当前所有调用点都不传它；留给未来确认不吃 reasoning 的端点用。
     """
     if retries is None:
-        retries = 1 if mode() == "local" else 3
+        # 本地"只重试一次"= 总共 2 次（1 次原始 + 1 次重试）；
+        # 之前写成 1，实际一次重试都没有，模型抽风一次整个拆题就废了
+        retries = 2 if mode() == "local" else 3
     last = ""
     for attempt in range(retries):
         prompt = system
@@ -475,8 +487,51 @@ def chat_json(system: str, user: str, retries: int | None = None,
         data = parse_json(raw)
         if data is not None:
             return data
+        log.warning("第 %d/%d 次 JSON 解析失败（回复开头：%s）",
+                    attempt + 1, retries, raw[:80].replace("\n", " "))
         last = "无法解析为 JSON 对象"
     raise LLMError(f"JSON 解析连续失败：{last}")
+
+
+# 1x1 白色 PNG：看图自检用，几十字节，不给模型任何可发挥的内容
+_TINY_PNG = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+             "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+def test_vision() -> dict:
+    """单独实测看图链路。
+
+    /api/llm/test 只发文本，测不出"minicpm-ocr 没配对 / mmproj 忘了挂"
+    这类问题——vision_ready 只是配置推断。这里真发一张 1x1 小图让模型回
+    {"ok":true}，配错立刻现形；失败信息原样带回，前端直接展示。
+    """
+    routes = vision_routes()
+    if not routes:
+        return {"tested": False, "ok": False, "message": _vision_hint()}
+    t0 = time.time()
+    try:
+        out = chat_vision(
+            "你是接口测试器。图片只是一张纯色小图。",
+            '只输出 JSON：{"ok":true}',
+            _TINY_PNG, "image/png", temperature=0,
+        )
+        data = parse_json(out) or {}
+        r = {
+            "tested": True,
+            "ok": bool(data.get("ok")),
+            "latency_ms": int((time.time() - t0) * 1000),
+            "model": _last_route.get("model", ""),
+        }
+        log.info("看图自检 %s · %dms · ok=%s", r["model"], r["latency_ms"], r["ok"])
+        return r
+    except Exception as e:
+        log.warning("看图自检失败：%s", str(e)[:200])
+        return {
+            "tested": True, "ok": False,
+            "latency_ms": int((time.time() - t0) * 1000),
+            "model": routes[0]["model"],
+            "message": str(e)[:200],
+        }
 
 
 def list_models() -> list[dict]:
@@ -510,6 +565,8 @@ def test() -> dict:
 
     顺带量一下生成速度——本地模型慢是主要矛盾（实测 2~5 t/s，
     一道题要拆 500~1500 token），这个数决定了一次拆题要等多久。
+    之前只测文本链路：看图模型（如本地 minicpm-ocr）配没配对根本测不出来，
+    现在补上 test_vision() 的实测。
     """
     if not available():
         return {"ok": False, "message": "还没有接入模型"}
@@ -533,6 +590,8 @@ def test() -> dict:
         # 样本太小时算不出可信的速率，宁愿不显示
         if tokens >= 10 and sec > 0:
             out_dict["tokens_per_sec"] = round(tokens / sec, 1)
+        # 看图链路单独真打一次请求；失败不影响整体 ok（文本能聊就能用）
+        out_dict["vision"] = test_vision()
         return out_dict
     except LLMTimeout as e:
         return {"ok": False, "message": str(e)[:300],

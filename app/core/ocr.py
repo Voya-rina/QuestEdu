@@ -9,8 +9,12 @@
 from __future__ import annotations
 
 import base64
+import logging
+import time
 
 from app.core import llm
+
+log = logging.getLogger(__name__)
 
 MAX_BYTES = 8 * 1024 * 1024          # 8MB，手机直出照片通常 2~4MB
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif"}
@@ -79,16 +83,22 @@ def extract(data: bytes, declared_mime: str | None = None) -> dict:
         return {"ok": False, "reason": "bad_type", "message": "只支持 png / jpg / webp 的图片。"}
 
     if not llm.vision_available():
+        log.info("OCR 拒绝：没有可用的看图模型（%s）", llm._vision_hint())
         return unavailable()
 
     b64 = base64.b64encode(data).decode("ascii")
+    targets = [f"{r['model']}@{r['name']}" for r in llm.vision_routes()]
+    t0 = time.time()
+    log.info("OCR 收图 %d 字节 · mime=%s · 目标=%s", len(data), mime, ",".join(targets))
     try:
         raw = llm.chat_vision(SYSTEM, "把这道题抄成 LaTeX。", b64, mime)
     except llm.LLMTimeout as e:
+        log.warning("OCR 超时（%dms）：%s", int((time.time() - t0) * 1000), str(e)[:120])
         return {"ok": False, "reason": "timeout", "retryable": True,
                 "message": f"模型还在算（{str(e)[:60]}），稍等一下再试一次；"
                            "本地模型首次加载会比较慢。"}
     except Exception as e:
+        log.warning("OCR 调用失败（%dms）：%s", int((time.time() - t0) * 1000), str(e)[:200])
         why = _explain_api_error(str(e))
         return {"ok": False, "reason": "api_error",
                 "message": why or f"识别服务没连上（{str(e)[:80]}），可以先把题目打进来。"}
@@ -96,12 +106,23 @@ def extract(data: bytes, declared_mime: str | None = None) -> dict:
     data_json = llm.parse_json(raw) or {}
     latex = (data_json.get("latex") or "").strip()
     if not data_json.get("found", bool(latex)) or not latex:
+        log.info("OCR 未认出数学题（%dms）· 模型原话开头：%s",
+                 int((time.time() - t0) * 1000), raw[:80].replace("\n", " "))
         return {"ok": False, "reason": "not_found",
                 "message": "这张图里没认出数学题，换个角度重拍，或者直接打进来。"}
 
+    used = llm._last_route  # noqa: SLF001  仅日志用途
+    log.info("OCR 成功 · %s@%s · %dms · latex %d 字",
+             used.get("model", "?"), used.get("name", "?"),
+             int((time.time() - t0) * 1000), len(latex))
     return {
         "ok": True,
         "latex": latex,
         "note": data_json.get("note", "") or "",
-        "engine": f"vision · {llm._cfg.get('vision_model', '')}",  # noqa: SLF001 内部信息只做日志用途
+        # 如实上报实际干活的那个端点：本地 minicpm-ocr 识别时，
+        # 以前这里写死云端 vision_model，排查"为什么没用本地模型"会被带偏
+        "engine": "vision · {model} @ {name}".format(
+            model=(llm._last_route.get("model") or "?"),  # noqa: SLF001
+            name=(llm._last_route.get("name") or "?"),    # noqa: SLF001
+        ),
     }

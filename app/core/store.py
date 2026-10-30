@@ -12,12 +12,28 @@
 from __future__ import annotations
 
 import os
+import threading
 from datetime import datetime
 
 from fastapi import HTTPException
 from sqlalchemy import delete, select
 
 from app.core.engine import Engine, Session
+
+
+# ---------------------------------------------------------------- 会话级锁
+#
+# FastAPI 的同步路由跑在线程池里：不同设备的不同会话天然并行，互不干扰。
+# 但同一个会话被两台设备同时提交时（比如共用一个二维码），引擎改的是
+# store 缓存里的同一个 Session 对象——加一把按 sid 分的锁，串行化同会话
+# 的写操作，跨会话照常并行。
+_sess_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+
+def session_lock(sid: str) -> threading.Lock:
+    with _locks_guard:
+        return _sess_locks.setdefault(sid, threading.Lock())
 
 
 class MemoryStore:

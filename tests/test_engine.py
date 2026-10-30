@@ -501,9 +501,14 @@ class TestQuestionInvariant(EngineCase):
         self.assertEqual(ensure_question("这题怎么做?  "), "这题怎么做?")
 
     def test_ensure_question_appends(self):
+        # 陈述句要被转成真正的疑问句，而不是补一句"那你觉得呢？"的空话
         out = ensure_question("这是陈述句。")
         self.assertTrue(out.endswith("？"))
-        self.assertIn("这是陈述句。", out)
+        self.assertIn("这是陈述句", out)
+        self.assertNotIn("那你觉得呢", out)
+        # 指令句转成"结果是多少？"的可答问句
+        self.assertEqual(ensure_question("把 x=2 代入，计算 y 值。"),
+                         "把 x=2 代入，计算 y 值，结果是多少？")
 
     def test_ensure_question_handles_empty(self):
         self.assertEqual(ensure_question(""), "再想一想？")

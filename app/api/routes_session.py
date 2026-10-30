@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.api.schemas import AnswerReq, AssessReq, CreateSessionReq
 from app.core.engine import Engine
-from app.core.store import store
+from app.core.store import session_lock, store
 
 router = APIRouter(prefix="/api/sessions", tags=["session"])
 
@@ -42,35 +42,40 @@ def get_session(sid: str):
 
 @router.post("/{sid}/messages")
 def send_message(sid: str, req: AnswerReq):
-    sess = store.get(sid)
     if not req.text.strip():
         raise HTTPException(400, "回答不能为空")
-    res = Engine.answer(sess, req.text.strip())
-    store.save(sess)          # 引擎改的是内存对象，这里整体落盘
+    # 同一会话串行：两台设备同时答同一题时不会互相踩状态
+    with session_lock(sid):
+        sess = store.get(sid)
+        res = Engine.answer(sess, req.text.strip())
+        store.save(sess)          # 引擎改的是内存对象，这里整体落盘
     return res
 
 
 @router.post("/{sid}/self-assessment")
 def self_assessment(sid: str, req: AssessReq):
-    sess = store.get(sid)
-    res = Engine.self_assess(sess, req.score)
-    store.save(sess)
+    with session_lock(sid):
+        sess = store.get(sid)
+        res = Engine.self_assess(sess, req.score)
+        store.save(sess)
     return res
 
 
 @router.post("/{sid}/variant")
 def make_variant(sid: str):
-    sess = store.get(sid)
-    res = Engine.make_variant(sess)
-    store.save(sess)
+    with session_lock(sid):
+        sess = store.get(sid)
+        res = Engine.make_variant(sess)
+        store.save(sess)
     return res
 
 
 @router.post("/{sid}/variant/answer")
 def answer_variant(sid: str, req: AnswerReq):
-    sess = store.get(sid)
-    res = Engine.judge_variant(sess, req.text.strip())
-    store.save(sess)
+    with session_lock(sid):
+        sess = store.get(sid)
+        res = Engine.judge_variant(sess, req.text.strip())
+        store.save(sess)
     return res
 
 

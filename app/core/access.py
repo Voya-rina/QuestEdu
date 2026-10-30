@@ -86,8 +86,6 @@ def set_code(new: str) -> str:
 
 def host_url() -> str:
     return str(_read().get("host_url") or "")
-
-
 def set_host_url(url: str) -> str:
     url = (url or "").strip()
     if url and not url.startswith(("http://", "https://")):
@@ -99,6 +97,57 @@ def set_host_url(url: str) -> str:
         d.pop("host_url", None)
     _write(d)
     return url
+
+
+# ---------------------------------------------------------------- 演示模式
+
+def demo_mode() -> bool:
+    """演示模式：开着时，模型设置（/api/llm/config、/test）服务端直接拒改。
+
+    防的是答辩/演示时底下观众扫码进来乱动设置——光靠前端把输入框灰掉
+    不算数，POST 可以绕过，必须在服务端拦。
+    """
+    return bool(_read().get("demo"))
+
+
+def set_demo(on: bool, ip: str = "") -> None:
+    d = _read()
+    d["demo"] = bool(on)
+    if on:
+        d["demo_ip"] = ip            # 记下开启者：只有这台机器能解锁
+    else:
+        d.pop("demo_ip", None)
+    _write(d)
+
+
+def demo_ip() -> str:
+    return str(_read().get("demo_ip") or "")
+
+
+# ---------------------------------------------------------------- 控制端识别
+
+def is_controller(peer: str, headers) -> bool:
+    """这台设备是不是控制端（一对多里的"一"）。
+
+    这个产品天然一对多：跑服务的电脑是控制端（演示者），扫码进来的
+    全是用户端（学生/观众）。权限边界就画在这里——
+
+    - 控制端：socket 对端 IP 是本机地址（loopback 或本机网卡）；
+    - **不认转发头**：cloudflared 也跑在本机，隧道流量的对端同样是
+      127.0.0.1，但它必然带着转发头（needs_code 已用它区分内外），
+      有转发头一律按用户端处理，否则隧道观众全能冒充控制端；
+    - 局域网里其他设备（包括同 WiFi 的观众手机）对端 IP 是它们自己，
+      天然不是控制端。
+    """
+    for h in _FORWARD_HEADERS:
+        if headers.get(h):
+            return False
+    p = (peer or "").strip().lower().strip("[]")
+    if p == "testclient":                  # FastAPI TestClient：单元测试视为控制端
+        return True
+    if p in ("127.0.0.1", "::1", "localhost"):
+        return True
+    return p in {ip.lower() for ip in lan_ips()}
 
 
 # ---------------------------------------------------------------- 访问码校验
@@ -398,7 +447,8 @@ class Tunnel:
 tunnel = Tunnel()
 
 
-def describe(port: int) -> dict:
+def describe(port: int, demo_unlockable: bool = True,
+             controller: bool = True) -> dict:
     ips = lan_ips()
     v6 = ipv6_global()
     return {
@@ -414,7 +464,13 @@ def describe(port: int) -> dict:
         },
         "tunnel": tunnel.snapshot(),
         "host": {"url": host_url()},
-        "gate": {"code": code(), "cookie": COOKIE, "length": CODE_LEN},
+        "controller": bool(controller),
+        # 演示模式：unlockable 只告诉"该解锁的那台机器"，别的设备连按钮都不给
+        "demo": {"on": demo_mode(), "unlockable": bool(demo_unlockable)},
+        # 访问码只发给控制端——用户端能拿到它的本来就说明是演示者本人；
+        # 观众不该看到码（看到就能转发给别人）。演示中连控制端也打码
+        "gate": {"code": code() if (controller and not demo_mode()) else "····",
+                 "cookie": COOKIE, "length": CODE_LEN},
     }
 
 

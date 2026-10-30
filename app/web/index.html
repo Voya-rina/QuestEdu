@@ -45,9 +45,23 @@ header{
   display:flex;align-items:center;justify-content:center;
 }
 .gear:active{background:#F2F3F6}
-.dots i{width:16px;height:3px;border-radius:2px;background:#DDE0E6;transition:.3s}
+.dots i{width:22px;height:3px;border-radius:2px;background:#DDE0E6;transition:.3s}
 .dots i.on{background:var(--brand)}
 .dots i.cur{background:var(--brand);opacity:.45}
+
+/* ---------- 轻提示（toast）：操作反馈要弹在眼前，不能藏在面板底部 ---------- */
+#toast{
+  position:fixed;top:calc(env(safe-area-inset-top, 0px) + 14px);left:50%;
+  transform:translate(-50%,-12px);z-index:300;pointer-events:none;
+  opacity:0;transition:.22s;width:max-content;max-width:86vw;
+}
+#toast.show{opacity:1;transform:translate(-50%,0)}
+.toast-item{
+  background:#0F1729;color:#EEF1F8;font-size:13.5px;line-height:1.55;
+  padding:10px 16px;border-radius:var(--r-md);box-shadow:0 8px 24px rgba(15,23,41,.28);
+  max-width:86vw;word-break:break-all;text-align:center;
+}
+.toast-item.err{background:#7A1F1F}
 .count{font-size:11px;color:var(--muted);margin-left:6px;font-variant-numeric:tabular-nums}
 
 main{flex:1 1 auto;overflow-y:auto;padding:0 16px 16px;-webkit-overflow-scrolling:touch}
@@ -301,14 +315,8 @@ input[type=range]::-webkit-slider-thumb{
 .sheet-foot .row{display:flex;gap:9px}
 .sheet-foot .btn{flex:1;margin:0}
 .sheet-foot .btn.ghost{flex:0 0 40%}
-/* 备注开关（head 里的小开关）+ 默认隐藏的说明文字 */
-.notes-sw{
-  display:inline-flex;align-items:center;gap:6px;margin-left:auto;
-  font-size:12px;color:var(--muted);cursor:pointer;user-select:none;
-}
-.notes-sw input{margin:0;accent-color:var(--brand);width:15px;height:15px;cursor:pointer}
+/* 备注默认隐藏：设置里的说明文字常驻隐藏（原"显示备注"开关已移除） */
 #llm-body .hidable{display:none}
-#llm-body.notes-on .hidable{display:block}
 
 /* ---------- 访问入口卡片 ---------- */
 .acc-card{
@@ -369,15 +377,14 @@ input[type=range]::-webkit-slider-thumb{
 }
 .qr-tabs button.on{background:var(--brand-soft);border-color:transparent;color:var(--brand);font-weight:600}
 .qr-tabs button:disabled{opacity:.45;cursor:default}
+/* 访问码收进卡片头右侧：tag + 数字 + 换一个 */
+.acc-code-inline{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.acc-code-inline b{font-size:18px;letter-spacing:.22em;font-variant-numeric:tabular-nums;font-weight:600}
+.acc-code-inline .linkbtn{padding:4px 2px}
 .qr-code-row{
   display:flex;align-items:center;gap:9px;margin-top:14px;flex-wrap:nowrap;
   font-variant-numeric:tabular-nums;
 }
-.qr-code-row b{
-  font-size:22px;letter-spacing:.18em;font-weight:700;color:var(--ink);
-}
-.qr-code-row .tag{flex:none;white-space:nowrap}
-.qr-code-row .linkbtn{margin-left:auto;flex:none}
 .acc-qr{flex:none;display:flex;justify-content:center}
 .acc-qr img{width:176px;height:176px;background:#fff;padding:8px;border-radius:var(--r-lg);border:1px solid var(--line)}
 .acc-qr img{cursor:zoom-in}
@@ -601,16 +608,12 @@ input[type=range]::-webkit-slider-thumb{
       <h1>一道题，<span>问到你自己会做</span>。</h1>
       <p class="sub">不给你答案，只给你下一个问题。</p>
       <div class="custom" id="custom" style="display:none">
-        <textarea id="c-input" rows="2" placeholder="粘贴题目，支持 LaTeX，比如 \lim_{x\to0}\frac{\sin x}{x}"></textarea>
+        <textarea id="c-input" rows="2" placeholder="输入题目，支持 LaTeX 格式"></textarea>
         <div class="c-actions">
-          <button class="btn ghost" id="c-shot">拍照</button>
-          <button class="btn ghost" id="c-album">从相册选</button>
-        </div>
-        <div class="c-actions" style="margin-top:9px">
-          <button class="btn" id="c-go">用这道题开始</button>
+          <button class="btn ghost" id="c-album" style="flex:0 0 38%">拍照 / 相册</button>
+          <button class="btn" id="c-go" style="flex:1;margin:0">用这道题开始</button>
         </div>
         <div class="c-note" id="c-note"></div>
-        <input type="file" id="c-file" accept="image/*" capture="environment" hidden>
         <input type="file" id="c-album-file" accept="image/*" hidden>
       </div>
       <div class="qlist" id="qlist"></div>
@@ -668,9 +671,7 @@ input[type=range]::-webkit-slider-thumb{
     <div class="sheet-head">
       <h3>设置</h3>
       <span class="cur-badge" id="cur-badge"></span>
-      <label class="notes-sw" title="显示/隐藏各处的说明文字">
-        <input type="checkbox" id="notes-toggle"><span>显示备注</span>
-      </label>
+      <button class="sheet-x" id="demo-btn" aria-label="演示模式" title="演示模式：锁定设置，防止演示时被改动" style="font-size:12px">🔓</button>
       <button class="sheet-x" id="llm-close" aria-label="关闭设置">✕</button>
     </div>
     <div class="sheet-tabs" id="sheet-tabs">
@@ -721,18 +722,19 @@ input[type=range]::-webkit-slider-thumb{
     <!-- 访问入口：二维码 / 局域网 / IPv6 / 隧道 / 托管，并行不互斥 -->
     <div class="sheet-scroll" id="access-scroll" style="display:none">
       <div class="acc-card" id="qr-card">
-        <div class="acc-h"><b>入口二维码</b></div>
+        <div class="acc-h">
+          <b>入口二维码</b>
+          <span class="acc-code-inline">
+            <span class="tag">访问码</span><b id="acc-code">····</b>
+            <button class="linkbtn" id="acc-change">换一个</button>
+          </span>
+        </div>
         <div class="qr-wrap">
           <div class="qr-side">
             <div class="qr-tabs" id="qr-tabs">
               <button data-qr="lan" class="on">局域网</button>
               <button data-qr="ipv6">IPv6</button>
               <button data-qr="tunnel">隧道</button>
-            </div>
-            <div class="qr-code-row">
-              <span class="tag">访问码</span>
-              <b id="acc-code">····</b>
-              <button class="linkbtn" id="acc-change">换一个</button>
             </div>
           </div>
           <div class="acc-qr"><img id="acc-qr-img" alt="入口二维码"></div>
@@ -783,9 +785,6 @@ input[type=range]::-webkit-slider-thumb{
         <button class="btn" id="acc-close">关闭</button>
       </div>
     </div>
-
-    <!-- 底部横条：按住往上滑，收起整个设置 -->
-    <div class="sheet-grab" id="llm-grab" title="往上滑收起"><i></i></div>
   </div>
 </div>
 
@@ -855,7 +854,13 @@ function fmt(t){
   ).join('');
 }
 const TEX_OPTS = {
-  delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],
+  // 模型常用 \[...\] 和 \(...\) 写公式，只认 $ 会整段不渲染
+  delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false},
+    {left:'\\(',right:'\\)',display:false},
+  ],
   throwOnError:false
 };
 function tex(el){
@@ -1037,20 +1042,27 @@ function askLeave(){
   });
 }
 
-function setProgress(cur, total){
+/* 头部进度：只保留 4 个点，对应教学四阶段（回顾/启发/纠偏/收束）。
+   节点数不固定，一个节点一个点会把头部挤满；阶段是稳定的 4 个。
+   左边的数字计数照旧，负责"推进到第几步"。 */
+const STAGE_SEQ = ['回顾', '启发', '纠偏', '收束'];
+let CUR_STAGE = -1;
+
+function setProgress(cur, total, stage){
   TOTAL = total || TOTAL;
-  $('#dots').innerHTML = `<span class="count">${cur}/${TOTAL}</span>`;
-  for(let i=0;i<TOTAL;i++){
-    const b = document.createElement('i');
-    if(i < cur-1) b.className = 'on';
-    else if(i === cur-1) b.className = 'cur';
-    $('#dots').appendChild(b);
-  }
+  const idx = STAGE_SEQ.indexOf(stage || '');
+  if(idx >= 0) CUR_STAGE = idx;
+  const dots = STAGE_SEQ.map((s, i) => {
+    const c = i < CUR_STAGE ? 'on' : (i === CUR_STAGE ? 'cur' : '');
+    return `<i${c ? ` class="${c}"` : ''} title="${s}"></i>`;
+  }).join('');
+  $('#dots').innerHTML = `<span class="count">${cur}/${TOTAL}</span>${dots}`;
 }
 
 /* 清空头部进度点。回到题目列表时必须调——否则 1/6 会跟着留在首页上 */
 function clearProgress(){
   $('#dots').innerHTML = '';
+  CUR_STAGE = -1;
 }
 
 async function api(path, body, signal){
@@ -1369,9 +1381,14 @@ async function boot(){
   $('#input').addEventListener('focus', () => setTimeout(() => { fitViewport(); scrollEnd(); }, 320));
 
   initPbarDrag();
-  initNotes();
   initQRCard();
+  initDemoLock();
   initLLM();
+  // 一对多的权限边界：设置是控制端（跑服务的电脑）专属。
+  // 观众设备上直接把齿轮藏掉——服务端同样拦着，这里只是不给他们看见入口
+  api('/api/llm').then(s => {
+    if(s && s.controller === false) $('#gear').style.display = 'none';
+  }).catch(() => {});
   await refreshHome();
 }
 document.addEventListener('DOMContentLoaded', boot);
@@ -1391,7 +1408,7 @@ const MODE_HINT = {
   hybrid: '优先云端，连不上自动回落本地——答辩时最稳。',
 };
 
-/* 设置头部那枚"当前生效"徽标：一眼看到现在跑的是哪个方案 */
+/* 设置头部那枚徽标：一眼看到现在跑的是哪个方案 */
 function setBadge(s){
   if(!s) s = {};
   let label;
@@ -1399,10 +1416,10 @@ function setBadge(s){
     label = '离线题库';
   }else{
     const zh = {cloud: '云端', local: '本地', hybrid: '混合'}[s.mode] || s.mode;
-    label = zh + ' · ' + (s.active_model || s.model || '');
+    label = zh + ' ' + (s.active_model || s.model || '');
   }
   const b = $('#cur-badge');
-  if(b) b.textContent = '当前生效 · ' + label;
+  if(b) b.textContent = label;
 }
 
 const FIELD_IDS = ['llm-base', 'llm-key', 'llm-model', 'llm-vmodel',
@@ -1511,40 +1528,60 @@ function closeSheet(sel){
   }, 210);
 }
 
-/* 顶部横条下拉关闭：手机上比找那个 × 顺手 */
-function bindSheetDrag(sheetSel, grabSel){
-  /* 面板从顶部展开，横条在底部：按住往上滑，滑过阈值就收起 */
-  const sheet = $(sheetSel), grab = $(grabSel);
-  if(!sheet || !grab) return;
-  const body = sheet.querySelector('.sheet-body');
-  let on = false, y0 = 0, dy = 0;
+/* ---------- 轻提示：任何操作反馈都弹出来，别写进面板深处的小字里 ---------- */
+let TOAST_T = null;
+function toast(msg, kind){
+  let el = $('#toast');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'toast';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `<div class="toast-item ${kind || ''}">${String(msg).replace(/</g, '&lt;')}</div>`;
+  requestAnimationFrame(() => el.classList.add('show'));
+  clearTimeout(TOAST_T);
+  TOAST_T = setTimeout(() => el.classList.remove('show'), 2800);
+}
 
-  grab.addEventListener('pointerdown', e => {
-    on = true; y0 = e.clientY; dy = 0;
-    body.style.animation = 'none';        // 动画会盖掉内联 transform
-    body.style.transition = 'none';
-    try{ grab.setPointerCapture(e.pointerId); }catch(_){}
-  });
-  grab.addEventListener('pointermove', e => {
-    if(!on) return;
-    dy = Math.min(0, e.clientY - y0);     // 只往上（负值）
-    body.style.transform = 'translateY(' + dy + 'px)';
-    if(e.cancelable) e.preventDefault();
-  });
-  const end = () => {
-    if(!on) return;
-    const dist = -dy;
-    on = false; dy = 0;
-    body.style.transition = 'transform .18s ease';
-    body.style.transform = '';
-    setTimeout(() => { body.style.transition = ''; }, 200);
-    if(dist > 60){
-      body.style.transform = '';
-      closeSheet(sheet);
+/* ---------- 演示模式：锁设置，防观众乱改（服务端强校验） ----------
+ * 锁定绑定开启者的设备 IP：只有按 🔓 开启的那台机器能看到按钮、能解锁。
+ * 观众设备上按钮不渲染，直接 POST 也会被服务端 IP 校验拦下。 */
+let DEMO = false;
+let DEMO_CAN_UNLOCK = true;
+
+function applyDemoUI(){
+  const btn = $('#demo-btn');
+  if(btn){
+    // 观众设备：按钮整个藏掉
+    btn.style.display = DEMO_CAN_UNLOCK ? '' : 'none';
+    btn.textContent = DEMO ? '🔒' : '🔓';
+    btn.title = DEMO ? '演示模式已开启，点此解锁（仅限开启设备）'
+                     : '点此开启演示模式（锁定设置，防止演示时被改动）';
+  }
+  FIELD_IDS.forEach(id => { const el = $('#' + id); if(el) el.disabled = DEMO; });
+  document.querySelectorAll('#llm-mode button').forEach(b => b.disabled = DEMO);
+  const save = $('#llm-save');
+  if(save) save.disabled = DEMO;
+  const ck = $('#llm-clearkey');
+  if(ck) ck.style.display = (KEY_SET && !DEMO) ? 'block' : 'none';
+  const ac = $('#acc-change');
+  if(ac) ac.disabled = DEMO;
+}
+
+function initDemoLock(){
+  $('#demo-btn').onclick = async () => {
+    try{
+      const r = await api('/api/access/demo', {on: !DEMO});
+      DEMO = !!r.on;
+      DEMO_CAN_UNLOCK = r.unlockable !== false;
+      applyDemoUI();
+      toast(DEMO ? '演示模式已开启：设置已锁定，本机点 🔒 可解锁'
+                 : '已解锁，可以正常修改设置了', DEMO ? '' : 'ok');
+    }catch(e){
+      // 服务没重启（接口不存在）、IP 不对、演示锁着……都弹在眼前
+      toast(e.message || '操作失败', 'err');
     }
   };
-  grab.addEventListener('pointerup', end);
-  grab.addEventListener('pointercancel', end);
 }
 
 /* ---------- 访问入口（局域网 / 隧道 / 托管 / 访问码）---------- */
@@ -1562,23 +1599,7 @@ function setTab(tab){
   if(!model) loadAccess();
 }
 
-/* 备注开关：默认关，说明文字全藏起来，要用再开（记住选择） */
-function initNotes(){
-  const box = $('#llm-body'), sw = $('#notes-toggle');
-  const apply = on => {
-    box.classList.toggle('notes-on', !!on);
-    sw.checked = !!on;
-  };
-  let saved = null;
-  try{ saved = localStorage.getItem('qe.notes'); }catch(e){}
-  apply(saved === '1');
-  sw.onchange = () => {
-    apply(sw.checked);
-    try{ localStorage.setItem('qe.notes', sw.checked ? '1' : '0'); }catch(e){}
-  };
-}
-
-/* 入口二维码：一个卡编三种地址，切到哪个编哪个。
+/* 备注常驻隐藏（开关已移除）；入口二维码：一个卡编三种地址，切到哪个编哪个。
    隧道没开时不给码——点了切到下面的隧道卡，让人去开。 */
 let QR_MODE = 'lan';
 
@@ -1613,7 +1634,7 @@ function renderQR(){
   }else{
     img.style.display = 'none';
     img.removeAttribute('src');
-    $('#qr-hint').textContent = '隧道还没开——点右边的「隧道」去开启，开了这里就有码。';
+    $('#qr-hint').textContent = '隧道还没开——点左侧的「隧道」去开启，开了这里就有码。';
   }
 }
 
@@ -1698,6 +1719,10 @@ async function loadAccess(){
   let a;
   try{ a = await api('/api/access'); }catch(e){ return; }
   ACC = a;
+  // 演示模式：访问码服务端已打码；非开启设备连 🔒 按钮都不显示
+  DEMO = !!(a.demo && a.demo.on);
+  DEMO_CAN_UNLOCK = !(a.demo && a.demo.on) || a.demo.unlockable !== false;
+  applyDemoUI();
   $('#access-scroll').scrollTop = 0;
 
   // 局域网
@@ -1820,7 +1845,6 @@ function initLLM(){
 
   $('#llm-close').onclick = () => closeSheet('#sheet-llm');
   $('#llm-cancel').onclick = () => closeSheet('#sheet-llm');
-  bindSheetDrag('#sheet-llm', '#llm-grab');
 
   // 打开设置并落到指定 tab；扫码按钮会传 'access' 再跳到二维码卡
   const openSettings = async (tab) => {
@@ -1844,6 +1868,9 @@ function initLLM(){
       applyDraft();
 
       setBadge(s);
+      DEMO = !!s.demo_locked;
+      DEMO_CAN_UNLOCK = s.demo_unlockable !== false;
+      applyDemoUI();
       const msg = $('#llm-msg');
       msg.className = 'lmsg';
       msg.textContent = '';
@@ -1933,9 +1960,15 @@ function initLLM(){
       clearInterval(tick); tick = null;
       if(t.ok){
         msg.className = 'lmsg ok';
+        // 看图链路现在是真发一张小图实测的：配错（如忘了挂 mmproj）当场现形
+        const v = t.vision || {};
+        const vTxt = v.tested
+          ? (v.ok ? ' · 拍照模型 ' + (v.model || '') + ' 正常 · ' + v.latency_ms + 'ms'
+                 : ' · 拍照模型不通：' + (v.message || ''))
+          : ' · 不可拍照：' + (v.message || t.vision_hint || '');
         msg.textContent = '连通正常 · ' + t.model + ' · ' + t.latency_ms + 'ms'
           + (t.tokens_per_sec ? ' · ' + t.tokens_per_sec + ' 字/秒' : '')
-          + (t.vision_ready ? ' · 可拍照' : '');
+          + vTxt;
         setTimeout(() => closeSheet('#sheet-llm'), 1200);
       }else{
         msg.className = 'lmsg err';
@@ -1961,14 +1994,12 @@ function updateShotButtons(){
   const hint = VISION_READY
     ? '拍一张或从相册选，识别成 LaTeX 后可以再改'
     : (VISION_HINT || '还不能拍照');
-  ['#c-shot', '#c-album'].forEach(sel => {
-    const b = $(sel); if(!b) return;
-    b.title = hint;
-    b.classList.toggle('dim', !VISION_READY);
-  });
+  const b = $('#c-album'); if(!b) return;
+  b.title = hint;
+  b.classList.toggle('dim', !VISION_READY);
 }
 
-function pickPhoto(useCamera){
+function pickPhoto(){
   const note = $('#c-note');
   // 不够用时直接把原因说出来，别让人点了没反应
   if(!VISION_READY){
@@ -1978,7 +2009,7 @@ function pickPhoto(useCamera){
     return;
   }
   note.textContent = '';
-  (useCamera ? $('#c-file') : $('#c-album-file')).click();
+  $('#c-album-file').click();
 }
 
 /* 裁剪：手机拍的一张里往往只有中间一小块是题目，整张传上去
@@ -1986,6 +2017,11 @@ function pickPhoto(useCamera){
 function openCrop(file){
   const img = $('#crop-img');
   const url = URL.createObjectURL(file);
+  // 图片解不出来（HEIC 之类）必须说一声，否则用户点完上传就石沉大海
+  img.onerror = () => {
+    URL.revokeObjectURL(url);
+    $('#c-note').textContent = '这张图打不开（浏览器解不了这个格式），换一张 JPG/PNG 试试。';
+  };
   img.onload = () => {
     URL.revokeObjectURL(url);
     $('#crop').classList.add('show');
@@ -2081,14 +2117,27 @@ function cropToBlob(){
 }
 
 async function uploadPhoto(blob){
-  const note = $('#c-note'), btns = [$('#c-shot'), $('#c-album')];
-  btns.forEach(b => b.disabled = true);
+  const note = $('#c-note'), btn = $('#c-album');
+  btn.disabled = true;
   const slow = (MODE === 'local' || MODE === 'hybrid');
+  // 本地看图模型慢是常态：数着秒等，别让人以为点了没反应
+  const t0 = Date.now();
   note.textContent = '正在识别…' + (slow ? '（本地模型要跑一会儿）' : '');
+  const tick = setInterval(() => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    note.textContent = '正在识别… 已等 ' + s + ' 秒'
+      + (s >= 15 ? '（本地看图模型加载/推理慢是常态，别关页面）' : (slow ? '（本地模型要跑一会儿）' : ''));
+  }, 1000);
   try{
     const fd = new FormData();
     fd.append('file', new File([blob], 'crop.jpg', {type:'image/jpeg'}));
     const r = await fetch('/api/ocr', {method:'POST', body:fd});
+    if(!r.ok){
+      let t = await r.text();
+      try{ t = JSON.parse(t).detail || t; }catch(_){}
+      note.textContent = '识别失败：' + String(t).slice(0, 120);
+      return;
+    }
     const d = await r.json();
     if(d.ok){
       $('#c-input').value = d.latex;
@@ -2098,9 +2147,10 @@ async function uploadPhoto(blob){
       note.textContent = d.message || '没认出来，可以直接把题目打进来。';
     }
   }catch(err){
-    note.textContent = '识别没成功，可以直接把题目打进来。';
+    note.textContent = '识别没成功（' + (err && err.message ? err.message : '网络错误') + '），可以直接把题目打进来。';
   }finally{
-    btns.forEach(b => b.disabled = false);
+    clearInterval(tick);
+    btn.disabled = false;
   }
 }
 
@@ -2110,16 +2160,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if(t) start(null, null, t);
   };
 
-  $('#c-shot').onclick = () => pickPhoto(true);
-  $('#c-album').onclick = () => pickPhoto(false);
+  $('#c-album').onclick = () => pickPhoto();
 
-  ['#c-file', '#c-album-file'].forEach(sel => {
-    $(sel).onchange = e => {
-      const f = e.target.files && e.target.files[0];
-      e.target.value = '';          // 允许再选同一张
-      if(f) openCrop(f);
-    };
-  });
+  $('#c-album-file').onchange = e => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';          // 允许再选同一张
+    if(f) openCrop(f);
+  };
 
   bindCrop();
 
@@ -2132,6 +2179,9 @@ document.addEventListener('DOMContentLoaded', () => {
     try{
       const blob = await cropToBlob();
       if(blob) await uploadPhoto(blob);
+      else $('#c-note').textContent = '图片裁剪失败了，重试一次，或直接把题目打进来。';
+    }catch(err){
+      $('#c-note').textContent = '图片处理失败：' + (err && err.message ? err.message : err);
     }finally{
       this.disabled = false;
     }
@@ -2166,7 +2216,7 @@ async function start(pid, btn, problem){
     setPbarCollapsed(false);
     tex($('#pbar-math'));
     $('#footer').classList.add('show');
-    setProgress(1, d.total_nodes);
+    setProgress(1, d.total_nodes, d.stage);
     addAI(d.message, d.stage, null);
     if(d.plan_fallback) addSys('模型拆题没成功，这题先用内置讲解脚本继续，流程和判定照常。', true);
     renderChoices(d.choices);
@@ -2221,7 +2271,7 @@ async function send(){
     }else{
       addAI(d.message, d.stage, d.note || null);
     }
-    if(d.progress) setProgress(d.progress[0], d.progress[1]);
+    if(d.progress) setProgress(d.progress[0], d.progress[1], d.stage);
     renderChoices(d.choices);
     if(d.next_action === 'self_assessment'){
       PHASE = 'assess';
@@ -2231,7 +2281,6 @@ async function send(){
     }
   }catch(e){ rmLoading(); addSys('请求失败：' + e.message); }
 }
-$('#send').onclick = send;
 
 /* ---------- 自评 ---------- */
 $('#score-range').oninput = e => $('#score-val').textContent = e.target.value;
@@ -2379,7 +2428,7 @@ async function showReport(sid, fromHistory){
 
   const fc = r['虚假自信记录'];
   const fcHtml = fc
-    ? `<div class="redtag"><strong>虚假自信 ${fc['自评']}%</strong><br>${fc['依据']}<br>状态：${fc['状态']}</div>`
+    ? `<div class="redtag"><strong>虚假自信 ${fc['自评']} / 5 分</strong><br>${fc['依据']}<br>状态：${fc['状态']}</div>`
     : `<div class="greentag">本次没有检出虚假自信。</div>`;
 
   const v = r['变式题'];

@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import logging
 import sys
 
 from fastapi import FastAPI
@@ -28,6 +29,15 @@ from app.core.access import AccessGate
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
+
+# 终端业务日志：OCR 收图/结果、每次 LLM 调用的路由与耗时、引擎判定、
+# 自评与变式，全部打到 stdout（START.cmd 的窗口里直接看），问题定位不靠猜。
+# uvicorn 自己的 access log 照旧，两层互不干扰。
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 def create_app() -> FastAPI:

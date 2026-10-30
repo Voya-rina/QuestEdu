@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -17,6 +18,8 @@ from datetime import datetime
 from app.core import llm, mathcheck
 from app.core.judge import BYPASS_PHRASES, hint_for, hits, verdict_cloud, verdict_offline
 from app.data.problems import PROBLEMS, get as get_problem
+
+log = logging.getLogger(__name__)
 
 MAX_WRONG_PER_NODE = 3
 
@@ -30,16 +33,14 @@ def choices_of(node: dict | None) -> list:
 def ensure_question(text: str) -> str:
     """最后一道保险：保证每条回复都以问句收尾。
 
-    大纲把这条列为不可违反的硬规则，但提示文案是数据、云端话术是模型生成的，
-    两边都可能漏。与其相信它们，不如在出口统一补一句——学生永远不会面对
-    一条没法回应的陈述。
+    模型的回复经常以陈述句结尾（"…应用洛必达法则。"），以前这里会补一句
+    "那你觉得呢？"——正是实测里学生最烦的那种无意义尾巴。现在改成把陈述
+    句转成真正的疑问句（"…法则，结果是多少？"），本就是问句的原样放行。
     """
-    t = (text or "").rstrip()
+    t = (text or "").strip()
     if not t:
         return "再想一想？"
-    if t.endswith(("?", "？")):
-        return t
-    return t + "\n\n那你觉得呢？"
+    return _to_question(t)
 
 
 # 模型偶尔会把"教学意图"写成教师视角的备注（"让学生掌握求导规则"），
@@ -375,6 +376,9 @@ class Engine:
         )
         first = sess.nodes[0]
         sess.log("assistant", first["question"], stage=first["stage"], node=1)
+        log.info("新会话 %s · 模式 %s · 题 %s · %d 节点%s",
+                 sess.id, sess.mode, pid, len(sess.nodes),
+                 "（拆题失败，内置脚本兜底）" if plan_fallback else "")
         return sess, {
             "session_id": sess.id,
             "mode": llm.mode(),
@@ -408,6 +412,7 @@ class Engine:
 
         # 防绕过：讨答案时固定话术共情，把问题拆到最小，不记错、不推进
         if hits(text, BYPASS_PHRASES):
+            log.info("会话 %s 讨答案，已拦下", sess.id)
             reply = (
                 "不给。给了你只是在读我的推导，不是在做题。\n\n"
                 "我们退到最小的一步——" + hint_for(node, 0)
@@ -470,6 +475,7 @@ class Engine:
         # 阶段标签由代码按当前节点指定——模型的 stage 是自由发挥，
         # 实测会导致界面上回顾/启发/纠偏乱跳
         stage = node["stage"]
+        log.info("会话 %s 节点 %d 判定 %s", sess.id, node["n"], verdict)
 
         # 每轮的 SymPy 核对结果不再显示：对了是废话，错了等于报答案。
         # 符号引擎的验证力放两处更合适——报告页的变式题标准答案，与测试用例。
@@ -524,17 +530,14 @@ class Engine:
             sess.node_wrong += 1
             if in_followup:
                 if sess.node_wrong >= 2:
-                    # 追问连错两次就直接给结论，别在这个小问题上卡死
-                    reply = advance(
-                        f"分母是 $x^{{{followup['numeric']}}}$，就展到 ${followup['numeric']}$ 阶。"
-                        + followup["reply"],
-                        kind="revealed",
-                    )
+                    # 追问连错两次就直接给结论，别在这个小问题上卡死。
+                    # followup["reply"] 本身就是以结论开头的话（"对，五阶。……"），
+                    # 通用机制不能再套某一题的模板
+                    reply = advance(followup["reply"], kind="revealed")
                 else:
-                    reply = (
-                        "只看分母：$x^{5}$ 的最高次是几？"
-                        "分子要含到 $x^{5}$ 这一项，展开到第几阶就够？"
-                    )
+                    # 第一次答错：把追问原样再问一遍。追问是所有题共用的机制，
+                    # 这里写死过"分母 x^5 展到几阶"——线代题的追问也会蹦出这句
+                    reply = "再想想——" + followup["question"]
             elif (sess.node_wrong == MAX_WRONG_PER_NODE - 1
                   and prereq and not sess.prereq_used):
                 # 第二次答错：先别急着给答案，退到这一步底下那块地基去
@@ -616,6 +619,7 @@ class Engine:
             }
 
         sess.log("system", sess.warning["message"], kind="warning")
+        log.info("会话 %s 自评 %d → %s", sess.id, score, sess.warning["level"])
         return sess.warning
 
     # ------------------------------------------------------------ 变式题
@@ -656,6 +660,8 @@ class Engine:
             "answer_latex": mathcheck.latex(answer) if answer is not None else "?",
             "answer_plain": mathcheck.plain(answer) if answer is not None else "?",
         }
+        log.info("会话 %s 变式题 · expr=%s · verified=%s",
+                 sess.id, expr[:60], answer is not None)
         return {"problem": problem, "ask": ask, "verified": answer is not None}
 
     @staticmethod
@@ -815,11 +821,15 @@ def cloud_variant(sess: Session) -> tuple[str, str]:
         "基于原题出一道同型变式题：换数字或换结构，题型、考点、难度都不变。"
         "只输出 JSON，不要代码块、不要解释：\n"
         '{"题目":"题面，公式用 $...$ 包住","sympy表达式":"一个表达式"}\n'
+        "「题目」必须是一条完整的中文题面，含具体数字，照原题的样子写。\n"
         "「sympy表达式」硬要求（程序会直接执行它算标准答案）：\n"
         "- 只写表达式本身，例如：(exp(3*x)-1-3*x)/x**2\n"
         "- 禁止写 sympy. 前缀；禁止写 limit()、solve()、simplify() 等函数调用——"
         "程序自己会对它求 x→0 的极限\n"
-        "- 幂用 **，乘号必须写 *，不要中文、不要等号、不要单位"
+        "- 幂用 **，乘号必须写 *，不要中文、不要等号、不要单位\n\n"
+        "示例（原题是 lim(x→0) (e^x-1-x)/x^2 时）：\n"
+        '{"题目":"$\\\\lim_{x \\\\to 0}\\\\frac{e^{2x}-1-2x}{x^{2}}$",'
+        '"sympy表达式":"(exp(2*x)-1-2*x)/x**2"}'
     )
     user = (
         f"原题：{sess.problem}\n知识点：{sess.plan.get('知识点')}\n"
@@ -829,11 +839,16 @@ def cloud_variant(sess: Session) -> tuple[str, str]:
     fallback = get_problem(sess.problem_id)["variant"]
     problem = (data.get("题目") or "").strip()
     expr = _clean_variant_expr(data.get("sympy表达式") or "")
-    if not problem or not expr or mathcheck.evaluate(expr) is None:
-        # 题面或表达式任一是坏的，整体回退：题面和答案必须配套
+    # 小模型会把提示词里的占位符原样抄回来（实测输出过字面的"LaTeX题目"），
+    # 题面不像人话就整体回退内置变式题
+    if (_PLACEHOLDER.search(problem) or len(problem) < 12
+            or not expr or mathcheck.evaluate(expr) is None):
         return fallback["latex"], fallback["表达式"]
     return problem, expr
 
+
+# 小模型会把提示词里的占位符原样抄回来当题面（实测输出过字面的"LaTeX题目"）
+_PLACEHOLDER = re.compile(r"LaTeX|题面|占位|表达式\"|示例|例如")
 
 def _clean_variant_expr(s: str) -> str:
     """洗模型给的 SymPy 表达式。

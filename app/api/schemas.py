@@ -16,7 +16,8 @@ class AnswerReq(BaseModel):
 
 
 class AssessReq(BaseModel):
-    score: int = Field(ge=0, le=100)
+    # 五分制（0~5）。以前是 le=100 的百分制遗留：发 88 会被引擎静默钳成 5 分
+    score: int = Field(ge=0, le=5)
 
 
 class LLMConfigReq(BaseModel):

@@ -14,11 +14,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from app.core.engine import Engine
-from app.core.store import store
+from app.core.store import session_lock, store
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["stream"])
 
@@ -47,16 +50,26 @@ async def chat_stream(ws: WebSocket):
                 await ws.send_json({"type": "error", "message": e.detail})
                 continue
 
-            res = Engine.answer(sess, text)
-            store.save(sess)
+            # 与 POST /messages 用同一把会话锁：WS 和 HTTP 同时打进来也不踩。
+            # 整段丢进线程池：Engine.answer 里可能同步等 LLM 好几分钟，
+            # 直接在事件循环上跑会把整个服务（其他设备的全部请求）一起冻住
+            def _answer_locked():
+                with session_lock(sid):
+                    res = Engine.answer(sess, text)
+                    store.save(sess)
+                return res
+
+            res = await asyncio.to_thread(_answer_locked)
 
             for piece in _chunks(res["message"]):
                 await ws.send_json({"type": "delta", "text": piece})
                 await asyncio.sleep(DELAY)
             await ws.send_json({"type": "done", **res})
     except WebSocketDisconnect:
+        log.info("WS 断开")
         return
     except Exception as e:                       # 兜底：别让异常把连接挂死
+        log.error("WS 异常：%s", str(e)[:200])
         try:
             await ws.send_json({"type": "error", "message": str(e)[:200]})
         except Exception:

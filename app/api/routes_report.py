@@ -55,7 +55,8 @@ def history(limit: int = 30, user: str = ""):
             "self_score": r.self_score,
             "created_at": r.created_at.isoformat(timespec="seconds"),
             "nodes_done": len(done),
-            "nodes_total": len(r.plan.get("nodes") or []),
+            # plan 列在老库行上可能是 NULL，直接 .get() 会 500 掉整个记录列表
+            "nodes_total": len((r.plan or {}).get("nodes") or []),
             "mistakes": mistakes,
         })
     return {"sessions": out}

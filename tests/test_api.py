@@ -183,7 +183,7 @@ class TestSessionFlow(APICase):
         sid = self._create()
         for text in ("0", "0/0"):
             client.post(f"/api/sessions/{sid}/messages", json={"text": text})
-        client.post(f"/api/sessions/{sid}/self-assessment", json={"score": 88})
+        client.post(f"/api/sessions/{sid}/self-assessment", json={"score": 4})
 
         r = client.get(f"/api/reports/{sid}/export.csv")
         self.assertEqual(r.status_code, 200)
