@@ -198,6 +198,25 @@ class TestVariant(EngineCase):
         res = Engine.judge_variant(sess, "1/6")
         self.assertEqual(res["self_score"], 2)
 
+    def test_expression_answer_is_judged_symbolically(self):
+        """答案本身是表达式（导函数）的变式题：学生输入整体解析后符号比对。
+
+        实测踩过：求导题的标准答案是 Abs(x)**4（模型只交了原函数），
+        学生答 4x**3 被抽出个 3 来比——必错。现在：答案表达式 + 符号判定。
+        """
+        sess, _ = Engine.create(problem_id="limit")
+        sess.variant = {
+            "problem": "求函数 $f(x)=|x|^{4}$ 的导数",
+            "expr": "diff(Abs(x)**4, x)",
+            "ask": "直接给出结果",
+            "answer_latex": "4 x^{3}",
+            "answer_plain": "4*x**3",
+        }
+        res = Engine.judge_variant(sess, "4x^3")
+        self.assertTrue(res["correct"], "4x^3 就是 |x|^4 的导函数，必须判对")
+        res2 = Engine.judge_variant(sess, "4x^4")
+        self.assertFalse(res2["correct"])
+
 
 class TestReport(EngineCase):
     def test_report_structure(self):

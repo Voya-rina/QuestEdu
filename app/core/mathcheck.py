@@ -71,10 +71,13 @@ _FULL_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 
 # 受限命名空间：只放数学对象，不放 __import__ / open / eval 可达的东西
 _EVAL_NS = {
-    "x": sp.Symbol("x"),
+    # 实数域符号：学校数学只在实数里做。默认的复数域 Symbol 会让
+    # diff(Abs(x)**n, x) 化不开（带出一堆 re(x)/im(x)），判分必挂
+    "x": sp.Symbol("x", real=True),
     "Symbol": sp.Symbol,
     "exp": sp.exp, "log": sp.log, "ln": sp.log, "sqrt": sp.sqrt,
     "sin": sp.sin, "cos": sp.cos, "tan": sp.tan, "cot": sp.cot,
+    "Abs": sp.Abs, "sign": sp.sign, "sgn": sp.sign,   # 导函数常用（|x|^k 的导数）
     "integrate": sp.integrate, "limit": sp.limit, "diff": sp.diff,
     "Matrix": sp.Matrix, "Rational": sp.Rational,
     "E": sp.E, "pi": sp.pi, "oo": sp.oo,
@@ -160,14 +163,73 @@ def _same_raw(a, b, tol: float) -> bool:
     return False
 
 
-def same(a, b, tol: float = 1e-9) -> bool:
-    """判断两个数学量是否严格相等（分数走符号化简，浮点走容差）。
+def _same_numeric_probe(a, b) -> bool:
+    """符号化简证不出相等时，代几个有理点做数值抽查。
 
-    simplify 可能被病态输入拖死，套超时：超时按"不相等"处理。
+    Abs / sign 的不同写法（3*x**2*sign(Abs(x)) vs 3*x**2*sign(x)）simplify
+    未必能证等，但代点必现形。全等函数在所有点上取值相同——抽查不等即不等；
+    抽查全相等就当作相等（对伴学判定足够，也宁可宽容不错判）。
     """
+    syms = list(getattr(a, "free_symbols", set()) | getattr(b, "free_symbols", set()))
+    if not syms or len(syms) > 2:
+        return False
+    for point in (sp.Rational(7, 3), sp.Rational(-5, 2), sp.Rational(1, 7)):
+        subs = {s: point for s in syms}
+        try:
+            va = complex(sp.N(a.subs(subs)))
+            vb = complex(sp.N(b.subs(subs)))
+        except Exception:
+            return False            # 代不进去（奇点等）：保守判不等
+        if abs(va - vb) > 1e-6 * max(1.0, abs(va), abs(vb)):
+            return False
+    return True
+
+
+def same(a, b, tol: float = 1e-9) -> bool:
+    """判断两个数学量是否相等：分数走符号化简，浮点走容差；
+    含符号的表达式化简证不出时，再代点数值抽查（见 _same_numeric_probe）。"""
     if a is None or b is None:
         return False
-    return bool(_with_timeout(_same_raw, (a, b, tol)))
+    if _with_timeout(_same_raw, (a, b, tol)):
+        return True
+    return bool(_with_timeout(_same_numeric_probe, (a, b)))
+
+
+# 学生会用来写答案的字符（"4x^3"、"y=9x-16"、"f(x)=x**2"）；出现别的就当不是表达式
+_EXPR_ONLY = re.compile(r"^[0-9A-Za-z_+\-*/().,='^]+$")
+
+
+def parse_student_expr(s: str):
+    """把学生的整段输入当表达式解析（供答案本身是表达式——导函数等——的题用）。
+
+    容忍：^ 幂号、缺乘号（4x^3）、带等号（y=9x-16 取右边）、全角符号。
+    出现中文/奇怪的字符、或解析出的符号超出 x/t 就放弃（返回 None），
+    由上层退回数字抽取。解析出的不是纯数值调用方也无需特判——same() 都能比。
+    """
+    s = str(s or "").strip()
+    if not s or len(s) > 80:
+        return None
+    s = s.translate(_FULL)
+    s = (s.replace("×", "*").replace("÷", "/").replace("－", "-")
+          .replace("－", "-").replace("＊", "*"))
+    if "=" in s:                     # "y=9x-16"、"f(x)=x^2" 取等号右边
+        s = s.rsplit("=", 1)[-1].strip()
+    if not _EXPR_ONLY.match(s):
+        return None
+    s = re.sub(r"\s+", "", s).replace("^", "**")
+    if not s or _CJK.search(s) or _DANGEROUS.search(s):
+        return None
+    try:
+        ns = {**_SAFE, "x": sp.Symbol("x", real=True), "t": sp.Symbol("t", real=True)}
+        e = _parse_expr(s, local_dict=ns, transformations=TRANSFORMS)
+    except Exception:
+        return None
+    if not isinstance(e, sp.Basic):
+        return None
+    free = {str(sym) for sym in getattr(e, "free_symbols", set())}
+    if free - _ALLOWED_SYMBOLS:
+        return None
+    return e
 
 
 def _limit_raw(expr_str: str, var: str, point):

@@ -481,9 +481,10 @@ def describe(port: int, demo_unlockable: bool = True,
         "controller": bool(controller),
         # 演示模式：unlockable 只告诉"该解锁的那台机器"，别的设备连按钮都不给
         "demo": {"on": demo_mode(), "unlockable": bool(demo_unlockable)},
-        # 访问码只发给控制端——用户端能拿到它的本来就说明是演示者本人；
-        # 观众不该看到码（看到就能转发给别人）。演示中连控制端也打码
-        "gate": {"code": code() if (controller and not demo_mode()) else "····",
+        # 访问码只发给控制端——观众不该看到码（看到就能转发给别人）。
+        # 演示模式中控制端**仍然能看到**：演示者要把码私下发给要进来的人，
+        # 全打码的话演示中根本没人连得上（实测踩过）
+        "gate": {"code": code() if controller else "····",
                  "cookie": COOKIE, "length": CODE_LEN},
     }
 

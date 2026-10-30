@@ -1052,6 +1052,9 @@ function setProgress(cur, total, stage){
   TOTAL = total || TOTAL;
   const idx = STAGE_SEQ.indexOf(stage || '');
   if(idx >= 0) CUR_STAGE = idx;
+  // 走完了（cur === total）就把四格全点亮：3 节点的计划映射不到"收束"，
+  // 不补这一下，最后一格永远空着，看起来就像 3/3 和四格对不上
+  if(cur >= TOTAL && TOTAL > 0) CUR_STAGE = STAGE_SEQ.length - 1;
   const dots = STAGE_SEQ.map((s, i) => {
     const c = i < CUR_STAGE ? 'on' : (i === CUR_STAGE ? 'cur' : '');
     return `<i${c ? ` class="${c}"` : ''} title="${s}"></i>`;
@@ -1575,6 +1578,8 @@ function initDemoLock(){
       DEMO = !!r.on;
       DEMO_CAN_UNLOCK = r.unlockable !== false;
       applyDemoUI();
+      // 立刻刷新整个面板：访问码显示、锁定状态都不等下次打开才有
+      loadAccess();
       toast(DEMO ? '演示模式已开启：设置已锁定，本机点 🔒 可解锁'
                  : '已解锁，可以正常修改设置了', DEMO ? '' : 'ok');
     }catch(e){

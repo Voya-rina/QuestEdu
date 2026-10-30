@@ -669,7 +669,13 @@ class Engine:
         if not sess.variant:
             return {"error": "还没有出变式题"}
         want = mathcheck.evaluate(sess.variant["expr"])
-        got = mathcheck.number_in(text)
+        if want is not None and getattr(want, "free_symbols", set()):
+            # 标准答案是表达式（导函数这类）：把学生输入整体当表达式解析后
+            # 符号比对（same() 会先化简、证不出再代点抽查）。
+            # 以前只会抽数字——学生答 4x**3 会被抽出个 3 来比，必错
+            got = mathcheck.parse_student_expr(text)
+        else:
+            got = mathcheck.number_in(text)
         correct = mathcheck.same(got, want)
         sess.variant_result = {
             "text": text,
@@ -812,24 +818,35 @@ class Engine:
 
 
 def cloud_variant(sess: Session) -> tuple[str, str]:
-    """让 LLM 出同型题，并给出可用于 SymPy 验证的表达式。
+    """让 LLM 出同型题，并给出可用于 SymPy 验证的**最终答案**表达式。
 
+    关键语义：「sympy表达式」必须是这道题的**答案**——求导题给导函数、
+    极限题给极限号里的式子（程序代求极限）、数值题给结果。以前 prompt 写死
+    "程序会对它求 x→0 的极限"，导致求导题模型只交原函数（|x|^3 的变式交了
+    abs(x)**4），学生答对的导函数被判错。
+    注意导函数写法：|x|^n 的导数是 n*x**(n-1)*sign(x)——不能写成
+    sign(Abs(x))（x<0 时那是 +1，符号就错了）。
     表达式求不出来就整体回退内置变式题——标准答案显示成 "?" 等于告诉学生
     这产品连自己都算不明白，宁可题面保守一点。
     """
     system = (
         "基于原题出一道同型变式题：换数字或换结构，题型、考点、难度都不变。"
         "只输出 JSON，不要代码块、不要解释：\n"
-        '{"题目":"题面，公式用 $...$ 包住","sympy表达式":"一个表达式"}\n'
+        '{"题目":"题面，公式用 $...$ 包住","sympy表达式":"这道题最终答案的 SymPy 表达式"}\n'
         "「题目」必须是一条完整的中文题面，含具体数字，照原题的样子写。\n"
-        "「sympy表达式」硬要求（程序会直接执行它算标准答案）：\n"
-        "- 只写表达式本身，例如：(exp(3*x)-1-3*x)/x**2\n"
-        "- 禁止写 sympy. 前缀；禁止写 limit()、solve()、simplify() 等函数调用——"
-        "程序自己会对它求 x→0 的极限\n"
-        "- 幂用 **，乘号必须写 *，不要中文、不要等号、不要单位\n\n"
-        "示例（原题是 lim(x→0) (e^x-1-x)/x^2 时）：\n"
+        "「sympy表达式」硬要求（程序会直接执行它算标准答案，所以必须就是**答案本身**）：\n"
+        "- 求导题：写导函数。例：x^3 的导数 → 3*x**2；|x|^4 的导数 → 4*x**3；"
+        "|x|^5 的导数 → 5*x**4*sign(x)（用 sign(x)，别用 sign(Abs(x))）\n"
+        "- 极限题：只写极限号里的式子，程序自己会求 x→0 的极限。"
+        "例：(exp(2*x)-1-2*x)/x**2\n"
+        "- 定积分/方程等其他题：写求值结果，可用 integrate(...)、solve(...)\n"
+        "- 禁止 sympy. 前缀；幂用 **，乘号必须写 *，不要中文、不要等号、不要单位\n\n"
+        "示例一（原题是 lim(x→0) (e^x-1-x)/x^2 时）：\n"
         '{"题目":"$\\\\lim_{x \\\\to 0}\\\\frac{e^{2x}-1-2x}{x^{2}}$",'
-        '"sympy表达式":"(exp(2*x)-1-2*x)/x**2"}'
+        '"sympy表达式":"(exp(2*x)-1-2*x)/x**2"}\n'
+        "示例二（原题是求 f(x)=|x|^3 的导数时）：\n"
+        '{"题目":"求函数 $f(x)=\\\\left|x\\\\right|^{5}$ 的导数",'
+        '"sympy表达式":"5*x**4*sign(x)"}'
     )
     user = (
         f"原题：{sess.problem}\n知识点：{sess.plan.get('知识点')}\n"

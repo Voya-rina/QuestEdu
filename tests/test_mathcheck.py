@@ -136,5 +136,51 @@ class TestCleanNumeric(unittest.TestCase):
             self.assertIsNotNone(mathcheck.parse_expr(cleaned), raw)
 
 
+class TestStudentExpr(unittest.TestCase):
+    """答案本身是表达式（导函数等）时，把学生输入整体解析后符号比对。"""
+
+    def test_parse_tolerant_forms(self):
+        x = sp.Symbol("x")
+        cases = {
+            "4x^3": 4 * x**3,          # 缺乘号 + ^ 幂号
+            "4x**3": 4 * x**3,
+            "4*x**3": 4 * x**3,
+            "y=9x-16": 9 * x - 16,      # 带等号取右边
+            "f(x)=x^2": x**2,
+        }
+        for raw, want in cases.items():
+            got = mathcheck.parse_student_expr(raw)
+            self.assertIsNotNone(got, raw)
+            self.assertTrue(mathcheck.same(got, want), f"{raw} → {got}")
+
+    def test_reject_non_expr(self):
+        for raw in ("", "二阶", "我不会", "f'(x)=?", "__import__('os')",
+                    "say hello world"):
+            self.assertIsNone(mathcheck.parse_student_expr(raw), raw)
+
+
+class TestSameProbe(unittest.TestCase):
+    """same() 的代点抽查：Abs/sign 不同写法 simplify 证不出，代点必现形。"""
+
+    def test_equivalent_sign_forms(self):
+        x = sp.Symbol("x")
+        # |x|^4 的导数：sympy 给 4*Abs(x)**3*sign(x)，学生写 4x^3——代点等值
+        self.assertTrue(mathcheck.same(
+            sp.sympify("4*Abs(x)**3*sign(x)"), sp.sympify("4*x**3")))
+        # |x|^3 的导数：3x|x| 与 3x^2*sign(x) 是同一个函数
+        self.assertTrue(mathcheck.same(
+            sp.sympify("3*x*Abs(x)"), sp.sympify("3*x**2*sign(x)")))
+        # 反例：sign(Abs(x)) 与 sign(x) 不是同一个函数（x<0 时一个 +1 一个 -1），
+        # probe 必须能区分，不能把它们误判为等价
+        self.assertFalse(mathcheck.same(
+            sp.sympify("3*x**2*sign(Abs(x))"), sp.sympify("3*x**2*sign(x)")))
+
+    def test_different_exprs_stay_false(self):
+        x = sp.Symbol("x")
+        self.assertFalse(mathcheck.same(sp.sympify("x"), sp.sympify("x + 1")))
+        self.assertFalse(mathcheck.same(sp.sympify("x**2"), sp.sympify("x**3")))
+        self.assertFalse(mathcheck.same(sp.Integer(3), sp.Integer(4)))
+
+
 if __name__ == "__main__":
     unittest.main()
