@@ -75,6 +75,7 @@ class Session:
     mode: str
     plan: dict
     problem_id: str = "limit"
+    user: str = ""                    # 归属用户；空串兼容老数据
     node_idx: int = 0
     node_wrong: int = 0
     followup_done: bool = False       # 当前节点的"追问"是否已经抛出
@@ -128,30 +129,28 @@ def demo_plan(prob: dict) -> dict:
     }
 
 
-PLAN_SYSTEM = """你是资深数学助教，把一道数学题拆成教学节点。只输出 JSON，不要代码块，不要解释。
-
+PLAN_SYSTEM = """你是数学助教，把一道题拆成学生逐步作答的小问题。只输出 JSON，不要解释：
 {"题型":"","知识点":[""],"难度":"","节点":[{"问":"","答":"","式":""}]}
 
-字段说明：
-- 问 = 直接对学生说的一句问句，以问号结尾。不要写"让学生…"这种教师备注。
-- 答 = 学生该回答的简短要点（一个数或一个式子），给学生看的说法
-- 式 = 这一小步期望值的**机器可读形式**，会被程序直接喂给 SymPy 求值。
+每个节点三条规则：
+1. 「问」：一小步的具体**疑问句**——句子里要有疑问词（多少 / 几 / 什么 / 哪一项），
+   以？结尾，答案是一个数、一个简短结果或一个方法名。
+   - 从"把具体值代进去看看"这类最基础的一步开始，先观察、再定方法、最后算结果
+   - 禁止指令式陈述："写出…""计算…""解出…"——改成"…是多少？"
+   - 禁止让学生默写完整公式（如"写出 e^x 的泰勒展开式"）——改问其中的具体量：第几阶、系数是多少、剩哪一项
+   - 禁止流程反问："你想…吗""准备好了吗""然后呢""那你觉得呢"
+2. 「答」：期望要点，给学生看的简短说法。
+3. 「式」：「答」的 SymPy 形式：纯 ASCII（1/2、-16、sqrt(2)/2、exp(2)、3*x^2-3）；
+   答案不是数值（方法名、名词）就写 ""。
 
-「式」的硬要求（写错这一格，判定就失效）：
-- 只能写一个表达式，不含汉字、不含等号左边、不含单位、不含说明文字、不含 $ 和 LaTeX
-- 只用 ASCII：幂写 `**` 或 `^`，乘号写 `*`，分数写 `1/2`，根号写 `sqrt(2)`
-- 正确：0 / 1/2 / -16 / 0.5 / 3*x^2-3 / sqrt(2)/2 / Rational(1,2) / exp(2)
-- 错误：二阶 / x=2 时 / 约等于 0.5 / \\frac{1}{2} / 3x²-3 / 2 阶（展到第 2 阶得到 4）
-- 这一小步的答案不是数值（比如问"用哪种方法"）时，写空串 ""，不要猜
+节点数不超过 __BUDGET__ 个。
 
-要求：
-1. 按真实解题顺序，每个节点只走一小步，不要合并。
-2. 每问必须能用一个数、一个式子或一个明确名词回答，不要出开放语义题。
-3. 只要「节点」，不要写完整解答——学生看不到，别浪费输出。
-4. 节点数：__BUDGET__ 个以内。
-
-示例（照这个格式写）：
-{"题型":"极限计算","知识点":["泰勒展开"],"难度":"中等","节点":[{"问":"$e^{0}$ 等于几？","答":"1","式":"1"},{"问":"分子展开到第几阶？","答":"2","式":"2"}]}"""
+示例（lim(x→0) (e^x-1-x)/x^2）：
+{"题型":"极限计算","知识点":["泰勒展开"],"难度":"中等","节点":[
+{"问":"先别急着算。把 x=0 代进分子和分母，它们各自变成几？","答":"分子分母都是 0","式":"0"},
+{"问":"这种分子分母同时为 0 的极限形式叫什么？","答":"0/0 型未定式","式":""},
+{"问":"分母是 x^2，分子用泰勒展开要展到第几阶？","答":"2 阶","式":"2"},
+{"问":"代回分子化简后约掉 x^2，极限等于多少？","答":"1/2","式":"1/2"}]}"""
 
 _STAGES = ["回顾", "启发", "纠偏", "收束"]
 
@@ -170,6 +169,47 @@ def _unescape(s: str) -> str:
 def _plan_budget() -> int:
     """节点数上限：本地模型慢，少拆几步；云端可以细一点。"""
     return 3 if llm.mode() == "local" else 6
+
+
+# 流程性反问 / 开场白：学生没法回答，出现即说明节点是废的。
+# 这是实测里小模型最常犯的毛病——第一个"问"就写成"那你觉得呢？"，
+# 引擎的 ensure_question 只会往后面再补一个问号，越补越糊涂
+_META_Q = re.compile(
+    r"你想|你觉得|你认不认为|要不要|好了吗|准备好了|可以开始|我们先|先从(哪个|哪里)"
+    r"|继续(吗|吧|么)|好不好|行不行|然后呢|怎么办|明白了吗|听懂了吗|接下来"
+)
+
+
+def _real_question(q: str) -> bool:
+    """一个节点问句是否"能答"：以问号结尾、不是流程反问、不是教师备注。"""
+    t = (q or "").strip()
+    if not t.endswith(("?", "？")):
+        return False
+    if _META_Q.search(t):
+        return False
+    if _TEACHER_TALK.match(t):
+        return False
+    return True
+
+
+# 模型爱写指令句（"将 x=2 代入…计算 y 值。"），ensure_question 只会补
+# "那你觉得呢？"，越补越糊涂。这里把陈述句改写成真正的疑问句。
+_STATEMENT_END = re.compile(r"[。；;.\s]+$")
+_FIND_VERB = re.compile(r"计算|代入|求出?|写出|化简|展开|解出|得到|算出")
+
+
+def _to_question(text: str) -> str:
+    """把节点问句尽量修成可回答的疑问句；已经是问句就原样返回。"""
+    t = (text or "").strip()
+    if t.endswith(("?", "？")):
+        return t
+    t = _STATEMENT_END.sub("", t).rstrip()
+    if not t:
+        return t
+    # 取最后一小句来补问（"…。它们的和是5，积是6。" → "…积是6，是多少？"）
+    if _FIND_VERB.search(t):
+        return t + "，结果是多少？"
+    return t + "，是多少？"
 
 
 def extract_questions(raw: str) -> list[dict]:
@@ -194,28 +234,10 @@ def extract_questions(raw: str) -> list[dict]:
     return out
 
 
-def cloud_plan(problem: str) -> dict:
-    budget = _plan_budget()
-    user = f"题目：\n{problem}\n\n节点数不超过 {budget} 个。"
-    try:
-        data = llm.chat_json(PLAN_SYSTEM.replace("__BUDGET__", str(budget)), user)
-        raw_nodes = data.get("节点") or data.get("节点计划") or data.get("nodes") or []
-        meta = {"题型": data.get("题型", ""), "知识点": data.get("知识点", []),
-                "难度": data.get("难度", "")}
-    except llm.LLMError as e:
-        # 整段 JSON 救不回来时，退回"按字段名捞问句"
-        raw_text = str(e)
-        raw_nodes, meta = [], {"题型": "", "知识点": [], "难度": ""}
-        if "JSON" not in raw_text:
-            raise
-        salvaged = _salvage_last_reply()
-        if not salvaged:
-            raise
-        raw_nodes, meta = salvaged, meta
-
-    raw_nodes = raw_nodes[:budget]
+def _build_nodes(raw_nodes: list, meta: dict, budget: int) -> list[dict]:
+    """把模型给的原始节点洗成引擎可用的节点（清洗 + 兜底）。"""
     nodes = []
-    for i, nd in enumerate(raw_nodes, start=1):
+    for i, nd in enumerate(raw_nodes[:budget], start=1):
         # 兼容三种写法：新的「问」、旧的「提问」、更旧的「教学意图」
         ask = nd.get("问") or nd.get("提问") or nd.get("question") or nd.get("教学意图") or ""
         ans = nd.get("答") or nd.get("期望答案") or ""
@@ -229,7 +251,7 @@ def cloud_plan(problem: str) -> dict:
             "n": i,
             "stage": _STAGES[min(i - 1, len(_STAGES) - 1)],
             "knowledge": nd.get("知识点") or (meta.get("知识点") or ["未分类"])[0],
-            "question": ensure_question(clean_ask(ask)),
+            "question": ensure_question(_to_question(clean_ask(ask))),
             "expect": ans,
             "numeric": numeric,
             "answers": [ans] if ans else [],
@@ -238,8 +260,65 @@ def cloud_plan(problem: str) -> dict:
             "partial_hint": "",
             "hints": [],
         })
+    return nodes
+
+
+def cloud_plan(problem: str) -> dict:
+    budget = _plan_budget()
+    system = PLAN_SYSTEM.replace("__BUDGET__", str(budget))
+    user = f"题目：\n{problem}\n\n节点数不超过 {budget} 个。"
+
+    data = raw_nodes = None
+    meta = {"题型": "", "知识点": [], "难度": ""}
+    last_nodes: list[dict] = []
+    # 小模型经常混进个别废节点。过半合格就直接用、剔掉废节点（重试一次
+    # 本地要多等几分钟，能不重试就不重试）；过半是废的才带着罪名重试一次。
+    for attempt in range(2):
+        try:
+            # 不设 max_tokens：实测这类小模型先写上千 token 的 reasoning 再出正文，
+            # 上限会把正文拦腰截断（JSON 断在半截 → 解析失败 → 白白重试）。
+            # 脱缰输出靠超时和降级兜底，不靠砍预算。
+            data = llm.chat_json(system, user)
+        except llm.LLMError as e:
+            # 整段 JSON 救不回来时，退回"按字段名捞问句"
+            raw_text = str(e)
+            if "JSON" not in raw_text:
+                raise
+            salvaged = _salvage_last_reply()
+            if not salvaged:
+                raise
+            raw_nodes, meta = salvaged, {"题型": "", "知识点": [], "难度": ""}
+        else:
+            raw_nodes = (data.get("节点") or data.get("节点计划") or data.get("nodes")
+                         or data.get("node") or [])   # 实测小模型会写成 "node"
+            meta = {"题型": data.get("题型", ""), "知识点": data.get("知识点", []),
+                    "难度": data.get("难度", "")}
+        last_nodes = _build_nodes(raw_nodes, meta, budget)
+        good = [n for n in last_nodes if _real_question(n["question"])]
+        if good and len(good) * 2 >= len(last_nodes):
+            return _pack_plan(_renumber(good), meta)
+        if attempt == 0:
+            system += ('\n\n你上一次输出的节点不合格：出现了流程性反问（如「你想…吗」「然后呢」）、'
+                       '不是问句、或教师视角的备注。每个「问」必须是学生能直接作答的具体数学问题，'
+                       '以问号结尾，包含作答所需的全部信息。重新输出全部节点。')
+
+    # 重试仍有废节点：能剔就剔，一个不剩也只能硬着头皮用（判定层有关键词兜底）
+    good = [n for n in last_nodes if _real_question(n["question"])]
+    nodes = _renumber(good) if good else last_nodes
     if not nodes:
         raise ValueError("计划生成失败：节点为空")
+    return _pack_plan(nodes, meta)
+
+
+def _renumber(nodes: list[dict]) -> list[dict]:
+    """剔掉废节点后重排 n 和 stage，保证进度条和阶段标签不串位。"""
+    for i, n in enumerate(nodes, start=1):
+        n["n"] = i
+        n["stage"] = _STAGES[min(i - 1, len(_STAGES) - 1)]
+    return nodes
+
+
+def _pack_plan(nodes: list[dict], meta: dict) -> dict:
     return {
         "题型": meta.get("题型", ""),
         "知识点": meta.get("知识点", []),
@@ -260,8 +339,10 @@ class Engine:
     """无状态的静态方法集合；所有会话状态在 Session 对象里。"""
 
     @staticmethod
-    def create(problem: str = "", problem_id: str | None = None) -> tuple[Session, dict]:
+    def create(problem: str = "", problem_id: str | None = None,
+               user: str = "") -> tuple[Session, dict]:
         use_demo = not llm.online()
+        plan_fallback = False
         if use_demo:
             prob = get_problem(problem_id)
             plan = demo_plan(prob)
@@ -270,7 +351,18 @@ class Engine:
         else:
             if not (problem or "").strip():
                 problem = get_problem(problem_id)["latex"]
-            plan = cloud_plan(problem)
+            try:
+                plan = cloud_plan(problem)
+            except Exception:
+                # 模型拆题失败（超时/JSON 连续失败/网络断）：内置题直接用
+                # 它的讲解脚本兜底，别让流程死在起点；自定义题没有脚本可用，
+                # 只能把错误带出去（路由层会转成 400 说明原因）
+                if problem_id and problem_id != "custom":
+                    prob = get_problem(problem_id)
+                    plan = demo_plan(prob)
+                    plan_fallback = True
+                else:
+                    raise
             pid = problem_id or "custom"
 
         sess = Session(
@@ -279,6 +371,7 @@ class Engine:
             mode=llm.mode(),
             plan=plan,
             problem_id=pid,
+            user=(user or "")[:64],
         )
         first = sess.nodes[0]
         sess.log("assistant", first["question"], stage=first["stage"], node=1)
@@ -286,6 +379,7 @@ class Engine:
             "session_id": sess.id,
             "mode": llm.mode(),
             "offline_demo": use_demo,
+            "plan_fallback": plan_fallback,
             "problem_id": pid,
             "problem": sess.problem,
             "meta": {
@@ -336,7 +430,10 @@ class Engine:
             if not llm.online():
                 verdict, _, _ = verdict_offline(text, prereq)
             else:
-                verdict, _, _ = verdict_cloud(text, prereq, sess.history)
+                try:
+                    verdict, _, _ = verdict_cloud(text, prereq, sess.history)
+                except llm.LLMError:
+                    verdict, _, _ = verdict_offline(text, prereq)
             sess.prereq_active = False
             back = "\n\n回到刚才那一步：" + node["question"]
             reply = (prereq["reply"] if verdict == "correct" else prereq["explain"]) + back
@@ -361,10 +458,18 @@ class Engine:
 
         if not llm.online():
             verdict, got, reply = verdict_offline(text, target)
-            stage = node["stage"]
         else:
-            verdict, reply, stage = verdict_cloud(text, target, sess.history)
-            got = mathcheck.number_in(text) if target.get("numeric") else None
+            try:
+                verdict, reply, _model_stage = verdict_cloud(text, target, sess.history)
+                got = mathcheck.number_in(text) if target.get("numeric") else None
+            except llm.LLMError:
+                # 模型抽风 / 网络/ JSON 连续解析失败：判定层降级成离线判定。
+                # 绝不能把 LLMError 漏成 500——学生只会看到一句没头没脑的
+                # "请求失败：Internal Server Error"
+                verdict, got, reply = verdict_offline(text, target)
+        # 阶段标签由代码按当前节点指定——模型的 stage 是自由发挥，
+        # 实测会导致界面上回顾/启发/纠偏乱跳
+        stage = node["stage"]
 
         # 每轮的 SymPy 核对结果不再显示：对了是废话，错了等于报答案。
         # 符号引擎的验证力放两处更合适——报告页的变式题标准答案，与测试用例。
@@ -522,9 +627,28 @@ class Engine:
         problem, expr = v["latex"], v["表达式"]
         ask = v.get("ask") or "直接给出结果"
         if llm.online():
-            problem, expr = cloud_variant(sess)
+            try:
+                problem, expr = cloud_variant(sess)
+            except llm.LLMError:
+                # 出题调用挂了就用内置变式题，流程不能断
+                pass
 
         answer = mathcheck.evaluate(expr)
+        # 云端变式题常给"极限号里的表达式"而不是极限值（出题 prompt 就是这么
+        # 要求的）——题目是极限题时，程序替它取 x→0 的极限，并把表达式改写成
+        # limit(...) 存回去，保证 judge_variant 判分时用的是同一个值
+        if (answer is not None and getattr(answer, "free_symbols", set())
+                and "lim" in (sess.problem or "").lower()):
+            lv = mathcheck.limit_of(expr, "x", 0)
+            if lv is not None:
+                expr = f"limit({expr}, x, 0)"
+                answer = lv
+        if answer is None and llm.online():
+            # 双保险：模型给的题/表达式求不出值，整体退回内置变式题。
+            # 标准答案显示成 "?" 等于告诉学生这产品连自己都算不明白
+            v0 = prob["variant"]
+            problem, expr = v0["latex"], v0["表达式"]
+            answer = mathcheck.evaluate(expr)
         sess.variant = {
             "problem": problem,
             "expr": expr,
@@ -682,15 +806,48 @@ class Engine:
 
 
 def cloud_variant(sess: Session) -> tuple[str, str]:
-    """让 LLM 出同型题，并给出可用于 SymPy 验证的表达式。"""
+    """让 LLM 出同型题，并给出可用于 SymPy 验证的表达式。
+
+    表达式求不出来就整体回退内置变式题——标准答案显示成 "?" 等于告诉学生
+    这产品连自己都算不明白，宁可题面保守一点。
+    """
     system = (
-        "出一道具同型变式题，难度与原题相当，只输出 JSON："
-        '{"题目":"LaTeX 题目","sympy表达式":"可直接用 sympy.limit 求值的 Python 表达式，变量 x"}'
+        "基于原题出一道同型变式题：换数字或换结构，题型、考点、难度都不变。"
+        "只输出 JSON，不要代码块、不要解释：\n"
+        '{"题目":"题面，公式用 $...$ 包住","sympy表达式":"一个表达式"}\n'
+        "「sympy表达式」硬要求（程序会直接执行它算标准答案）：\n"
+        "- 只写表达式本身，例如：(exp(3*x)-1-3*x)/x**2\n"
+        "- 禁止写 sympy. 前缀；禁止写 limit()、solve()、simplify() 等函数调用——"
+        "程序自己会对它求 x→0 的极限\n"
+        "- 幂用 **，乘号必须写 *，不要中文、不要等号、不要单位"
     )
     user = (
         f"原题：{sess.problem}\n知识点：{sess.plan.get('知识点')}\n"
-        "请出一道换数字/换结构的同型题，别改题型。"
+        "出一道换数字/换结构的同型题，别改题型。"
     )
     data = llm.chat_json(system, user)
     fallback = get_problem(sess.problem_id)["variant"]
-    return data.get("题目", fallback["latex"]), data.get("sympy表达式", fallback["表达式"])
+    problem = (data.get("题目") or "").strip()
+    expr = _clean_variant_expr(data.get("sympy表达式") or "")
+    if not problem or not expr or mathcheck.evaluate(expr) is None:
+        # 题面或表达式任一是坏的，整体回退：题面和答案必须配套
+        return fallback["latex"], fallback["表达式"]
+    return problem, expr
+
+
+def _clean_variant_expr(s: str) -> str:
+    """洗模型给的 SymPy 表达式。
+
+    常见毛病：写 `sympy.limit((...), x, 0)` 这种带前缀/函数调用的形式——
+    沙箱命名空间里没有 `sympy` 这个名字，求值必然 NameError。剥掉前缀、
+    从 limit(...) 调用里抠出内层表达式，再交给 evaluate 验证。
+    """
+    s = str(s or "").strip().strip("`$ ")
+    s = s.replace("sympy.", "")
+    m = re.search(
+        r"^limit\s*\(\s*(.+?)\s*,\s*x\s*(?:,[^,()]*)?(?:,\s*dir\s*=\s*['\"]?[+-]['\"]?)?\s*\)\s*$",
+        s,
+    )
+    if m:
+        s = m.group(1)
+    return s.strip()

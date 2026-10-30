@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/sessions", tags=["session"])
 @router.post("")
 def create_session(req: CreateSessionReq):
     try:
-        sess, payload = Engine.create(req.problem.strip(), req.problem_id)
+        sess, payload = Engine.create(req.problem.strip(), req.problem_id, req.user.strip())
     except Exception as e:
         raise HTTPException(400, f"拆题失败：{str(e)[:300]}")
     store.save(sess)

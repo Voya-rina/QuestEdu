@@ -18,6 +18,49 @@ from app.core.store import store
 router = APIRouter(prefix="/api/reports", tags=["report"])
 
 
+@router.get("/history")
+def history(limit: int = 30, user: str = ""):
+    """首页「学习记录」：最近会话的轻量列表。
+
+    故意不走 store.get()——那条路会把每条消息都拉出来，列表页用不上。
+    直接查 sessions 表，汇总字段从 JSON 列里现场算。
+    传了 user 就只看这个人的：记录按用户分开，不堆在一起。
+    """
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import SessionRow
+
+    limit = max(1, min(100, limit))
+    stmt = select(SessionRow).order_by(SessionRow.created_at.desc()).limit(limit)
+    if user.strip():
+        stmt = stmt.where(SessionRow.user == user.strip()[:64])
+    with SessionLocal() as s:
+        rows = s.scalars(stmt).all()
+
+    out = []
+    for r in rows:
+        results = r.results or []
+        done = [x for x in results if x.get("verdict") in ("correct", "revealed")]
+        mistakes = sum(
+            1 for x in results
+            if x.get("verdict") in ("wrong", "revealed") or x.get("wrong", 0) > 0
+        )
+        out.append({
+            "id": r.id,
+            "subject": r.subject or r.problem_id or "自定义题",
+            "problem": r.problem,
+            "mode": r.mode,
+            "status": r.status,                     # running / finished / assessed
+            "self_score": r.self_score,
+            "created_at": r.created_at.isoformat(timespec="seconds"),
+            "nodes_done": len(done),
+            "nodes_total": len(r.plan.get("nodes") or []),
+            "mistakes": mistakes,
+        })
+    return {"sessions": out}
+
+
 @router.get("/{sid}/radar")
 def radar(sid: str):
     return Engine.radar(store.get(sid))

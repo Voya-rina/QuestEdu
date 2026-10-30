@@ -65,7 +65,7 @@ class TestFallback(LLMCase):
     def test_falls_back_to_local(self):
         calls = []
 
-        def fake_send(route, messages, temperature):
+        def fake_send(route, messages, temperature, max_tokens=None):
             calls.append(route["name"])
             if route["name"] == "cloud":
                 raise llm.LLMError("HTTP 401 · invalid key")
@@ -89,7 +89,7 @@ class TestFallback(LLMCase):
         llm._cfg.update(mode="cloud")
         calls = []
 
-        def fake_send(route, messages, temperature):
+        def fake_send(route, messages, temperature, max_tokens=None):
             calls.append(route["name"])
             raise llm.LLMError("boom")
 
@@ -238,7 +238,7 @@ class TestTimeout(LLMCase):
         self._local()
         calls = []
 
-        def fake(route, messages, temperature):
+        def fake(route, messages, temperature, max_tokens=None):
             calls.append(route["name"])
             raise llm.LLMTimeout("等了 900 秒还没回话")
 
@@ -251,7 +251,7 @@ class TestTimeout(LLMCase):
         llm._cfg.update(mode="hybrid", base_url="https://x/v1", api_key="k",
                         local_base_url="http://127.0.0.1:1234/v1")
 
-        def fake(route, messages, temperature):
+        def fake(route, messages, temperature, max_tokens=None):
             if route["name"] == "cloud":
                 raise llm.LLMError("HTTP 401")
             raise llm.LLMTimeout("等了 60 秒")

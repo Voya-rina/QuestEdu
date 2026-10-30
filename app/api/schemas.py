@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 class CreateSessionReq(BaseModel):
     problem: str = ""
     problem_id: str | None = None
+    user: str = Field(default="", max_length=64)   # 学习记录按用户分开保存
 
 
 class AnswerReq(BaseModel):

@@ -32,6 +32,7 @@ class SessionRow(Base):
 
     id: Mapped[str] = mapped_column(String(16), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    user: Mapped[str] = mapped_column(String(64), default="")         # 归属用户（学习记录按人分）
     subject: Mapped[str] = mapped_column(String(64), default="")      # 题型，如"极限计算"
     problem: Mapped[str] = mapped_column(Text, default="")            # 题目原文（LaTeX）
     problem_id: Mapped[str] = mapped_column(String(32), default="")

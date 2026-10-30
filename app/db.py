@@ -40,3 +40,20 @@ class Base(DeclarativeBase):
 def init_db() -> None:
     from app import models  # noqa: F401  建表需要模型先被导入
     Base.metadata.create_all(engine)
+    _migrate()
+
+
+def _migrate() -> None:
+    """轻量迁移：给老库补新列。
+
+    create_all 只建新表，不会给已存在的表加列；SQLite 直接 ALTER 即可，
+    加列不动任何已有数据，失败也只意味着老库少了 user 字段（默认空串）。
+    """
+    if not _IS_SQLITE:
+        return
+    from sqlalchemy import text
+    with engine.connect() as c:
+        cols = [r[1] for r in c.exec_driver_sql("PRAGMA table_info(sessions)")]
+        if "user" not in cols:
+            c.execute(text("ALTER TABLE sessions ADD COLUMN user VARCHAR(64) DEFAULT ''"))
+            c.commit()

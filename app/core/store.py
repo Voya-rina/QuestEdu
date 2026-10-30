@@ -76,6 +76,7 @@ class SqlStore:
                 s.add(row)
 
             row.created_at = _parse_dt(sess.created_at)
+            row.user = (getattr(sess, "user", "") or "")[:64]
             row.subject = sess.plan.get("题型") or ""
             row.problem = sess.problem
             row.problem_id = sess.problem_id
@@ -201,6 +202,7 @@ class SqlStore:
             mode=row.mode,
             plan=row.plan or {"nodes": []},
             problem_id=row.problem_id or "",
+            user=getattr(row, "user", "") or "",
             node_idx=row.node_idx,
             node_wrong=row.node_wrong,
             followup_done=row.followup_done,

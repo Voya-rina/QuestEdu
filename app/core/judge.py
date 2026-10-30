@@ -69,8 +69,9 @@ def verdict_offline(text: str, node: dict):
         want = mathcheck.parse_expr(num)
         got = mathcheck.number_in(text)
         # want 解析不出来（模型给的是"计算 y'=3x^2-3"这种带说明的串）就当没有：
-        # 不能因为一条不可求值的期望值，把答对的学生判成错
-        if got is not None and want is not None:
+        # 不能因为一条不可求值的期望值，把答对的学生判成错。
+        # want 是表达式（含符号）时同样不比数字——"y=9x-16" 抽出 16 去比必误判
+        if got is not None and want is not None and want.is_number:
             return ("correct" if mathcheck.same(got, want) else "wrong"), got, ""
         # 没抽到数字，可能是"二阶""x²"这类表述，继续往下走
 
@@ -84,24 +85,40 @@ def verdict_offline(text: str, node: dict):
     return "wrong", None, ""
 
 
-CLOUD_JUDGE_SYSTEM = """你是数学助教，只做一件事：判定学生的这一句回答，在"当前这一小步"上是否成立。
+CLOUD_JUDGE_SYSTEM = """你是数学解题程序里的判定器。学生正按小步解题，你只判定他刚提交的一句回答，并回一句话。
 
-严格的 JSON 输出，不要 Markdown：
-{"verdict":"correct|partial|wrong","extracted_value":"学生给出的最终数值，没有就空字符串","stage":"回顾|启发|纠偏|收束","reply":"你对学生说的话"}
+输入分四段：
+【当前问题】学生要回答的那一小步
+【期望要点】这一步该答出的内容
+【近期对话】上下文
+【学生这次说】判定对象（只判这一句，不要替他补答）
 
-extracted_value 的要求（这一格会被程序直接喂给 SymPy 复核）：
-- 只写数值本身：1/2、0.5、-16、0、sqrt(2)/2、3*x^2-3
-- 纯 ASCII，不要单位、不要汉字、不要在式子里带等号、不要 $ 和 LaTeX
-- 学生没给出具体数值（只是说思路、说方法）时写空字符串 ""，不要替他补
+第一步，判 verdict（三选一）：
+- correct：回答给出了期望要点的具体内容（数值 / 式子 / 名词）
+- partial：方向对但不完整，只答了一半
+- wrong：答非所问、看不懂题、拒绝作答，或只是敷衍话
+判定从宽：答案是期望要点的数值一致形式、简写或省略说法，都算 correct
+（例：期望「分子分母都是 0」，学生答「0」= correct）
 
-硬规则（最高优先级）：
-1. 绝不给出最终答案，绝不给完整解题过程。
-2. 只针对当前这一步回应，一次只问一个问题。
-3. 学生答错时，用更小的问题把他拉回到能答对的地方；不要直接讲正确答案。
-4. 学生说"直接给我答案/别问了"时，共情一句，然后把问题拆得更小。
-5. **reply 必须以一个问句结尾**：学生看完必须清楚下一步该回答什么。提示和问题写在同一条消息里，
-   不要先发一条纯陈述、等学生随便回一句再补问题。
-6. reply 控制在 60 字以内，可用 $...$ 写 LaTeX。"""
+敷衍话规则（最容易判错的地方）：
+"对""好""嗯""继续""？""好的""是的""明白了"这类话不是数学回答。
+- 当前问题要求具体数学内容时，这类回答一律判 wrong
+- 只有当前问题本身是是非题（例："这一步等于 1 吗？"）时，"对 / 不对"才算回答
+- 判 wrong 时绝不顺着敷衍话往下走
+
+第二步，给 extracted_value：学生回答里的最终数值，纯 ASCII（如 1/2、0.5、-16、sqrt(2)/2、3*x^2-3）。
+没有数值就写空串 ""，不要替他编。
+
+第三步，写 reply（对学生说的话，≤60 字，必须以问号结尾）：
+- **reply 一律用简体中文**，哪怕学生用英文或其他语言作答
+- correct：一句话肯定，然后抛出下一个具体的小问题；**不得再要求学生补充这一步**
+- wrong：绝不给答案、不复述原话；把当前问题拆成更小更直白的一问
+  （例：问展开阶数不会，就先问"x 的几次方项是决定性的？"）
+- partial：指出缺了哪一半，再问他补上
+- 针对学生这次说了什么来回应，不要自顾自推进流程；LaTeX 用 $...$
+
+只输出 JSON，不要 Markdown，不要解释：
+{"verdict":"correct|partial|wrong","extracted_value":"","reply":""}"""
 
 
 def verdict_cloud(text: str, node: dict, history: list):
@@ -109,25 +126,37 @@ def verdict_cloud(text: str, node: dict, history: list):
 
     第 3 层（语义兜底）只在云端生效——离线模式下前两层仍管用，
     这是"断网也能演示"的基础。
+    阶段标签不信任模型：它爱把 stage 当创作发挥，导致界面上
+    回顾/启发/纠偏乱跳。stage 一律由代码按当前节点指定。
     """
     ctx = "\n".join(f"{h['role']}: {h['text']}" for h in history[-6:])
     expect = node.get("expect") or "、".join(node.get("answers") or [])
     user = (
-        f"当前这一小步的问法：「{node.get('question', '')}」\n"
-        f"期望学生答出的要点：「{expect}」\n"
-        f"近期对话：\n{ctx}\n\n学生这次说：{text}"
+        f"【当前问题】{node.get('question', '')}\n"
+        f"【期望要点】{expect}\n"
+        f"【近期对话】\n{ctx}\n\n"
+        f"【学生这次说】{text}"
     )
     data = llm.chat_json(CLOUD_JUDGE_SYSTEM, user)
     verdict = str(data.get("verdict", "wrong")).lower()
     if verdict not in ("correct", "partial", "wrong"):
         verdict = "wrong"
 
-    extracted = str(data.get("extracted_value", "") or "")
-    if extracted and node.get("numeric"):
-        got = mathcheck.number_in(extracted)
+    # 数值核对是最后一道闸，模型说了不算：
+    # 优先用模型抠出的值，抠不出来再从学生原话里抽一次（小模型经常漏抽）
+    # 只对"期望值本身是纯数值"的节点生效——期望是方程/表达式（y=9x-16）时，
+    # 从学生原话里抽数字去和表达式比必然误判，交给关键词和语义层
+    if node.get("numeric"):
         want = mathcheck.parse_expr(node["numeric"])
-        if got is not None and want is not None:
-            # 符号引擎说话，模型让位——护城河就落在这三行
-            verdict = "correct" if mathcheck.same(got, want) else "wrong"
+        if want is not None and want.is_number:
+            got = None
+            for src in (str(data.get("extracted_value", "") or ""), text):
+                if src:
+                    got = mathcheck.number_in(src)
+                    if got is not None:
+                        break
+            if got is not None:
+                # 符号引擎说话，模型让位——护城河就落在这几行
+                verdict = "correct" if mathcheck.same(got, want) else "wrong"
 
-    return verdict, data.get("reply", ""), data.get("stage", node.get("stage", "纠偏"))
+    return verdict, data.get("reply", ""), node.get("stage")

@@ -280,11 +280,14 @@ def _strip_fence(text: str) -> str:
     return t.strip()
 
 
-def chat(system: str, user: str, temperature: float = 0.3) -> str:
-    """纯文本对话。"""
+def chat(system: str, user: str, temperature: float = 0.3,
+         max_tokens: int | None = None) -> str:
+    """纯文本对话。max_tokens 给本地小模型拴上缰绳：它一跑飞就是几千 token，
+    学生要等几分钟还什么都得不到。"""
     return _post(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature,
+        max_tokens=max_tokens,
     )
 
 
@@ -306,7 +309,8 @@ def chat_vision(system: str, user: str, image_b64: str, mime: str = "image/png",
     )
 
 
-def _post(messages: list, temperature: float, routes: list[dict] | None = None) -> str:
+def _post(messages: list, temperature: float, routes: list[dict] | None = None,
+          max_tokens: int | None = None) -> str:
     routes = _routes() if routes is None else routes
     if not routes:
         raise LLMError("未配置 LLM（当前模式 %s）" % mode())
@@ -315,7 +319,7 @@ def _post(messages: list, temperature: float, routes: list[dict] | None = None) 
     all_timeout = True
     for route in routes:
         try:
-            out = _send(route, messages, temperature)
+            out = _send(route, messages, temperature, max_tokens)
             globals()["_last_raw"] = out
             return out
         except LLMTimeout as e:
@@ -330,7 +334,8 @@ def _post(messages: list, temperature: float, routes: list[dict] | None = None) 
     raise LLMError(msg)
 
 
-def _send(route: dict, messages: list, temperature: float) -> str:
+def _send(route: dict, messages: list, temperature: float,
+          max_tokens: int | None = None) -> str:
     import httpx  # 延迟导入：离线模式完全不需要
 
     headers = {"Content-Type": "application/json"}
@@ -341,6 +346,8 @@ def _send(route: dict, messages: list, temperature: float) -> str:
         "temperature": temperature,
         "stream": False,
     }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     # connect 单独设小：地址填错要立刻报错，不能陪着 read timeout 一起等十几分钟
     limit = httpx.Timeout(connect=8, read=route.get("timeout") or 120, write=60, pool=8)
     t0 = time.time()
@@ -443,13 +450,18 @@ def parse_json(raw: str) -> dict | None:
     return None
 
 
-def chat_json(system: str, user: str, retries: int | None = None, temperature: float = 0.2) -> dict:
+def chat_json(system: str, user: str, retries: int | None = None,
+              temperature: float = 0.2, max_tokens: int | None = None) -> dict:
     """强制 JSON 输出。解析失败自动重试（大纲：结构化输出约束）。
 
     但**本地只重试一次**，超时则完全不重试：
     - 本地模型一次推理要几分钟，重发只会让它在队列里排更久（LM Studio 日志里的
       "Client disconnected" 就是这么来的——客户端走了，服务端还在算）
     - 解析失败重试三次，在本地就意味着多等十来分钟，学生早走了
+
+    max_tokens：可选的输出上限。注意：实测本地小模型（ling-3.0-tiny 等）会先写
+    上千 token 的 reasoning 再出正文，设小了会把正文截断甚至饿成空串——
+    所以当前所有调用点都不传它；留给未来确认不吃 reasoning 的端点用。
     """
     if retries is None:
         retries = 1 if mode() == "local" else 3
@@ -459,7 +471,7 @@ def chat_json(system: str, user: str, retries: int | None = None, temperature: f
         if attempt:
             prompt = system + ("\n\n上一次输出不是合法 JSON。只输出 JSON 对象本身，"
                                "不要 Markdown 代码块、不要任何解释文字。")
-        raw = chat(prompt, user, temperature=temperature)
+        raw = chat(prompt, user, temperature=temperature, max_tokens=max_tokens)
         data = parse_json(raw)
         if data is not None:
             return data

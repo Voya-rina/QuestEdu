@@ -63,8 +63,8 @@ _FULL_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 _EVAL_NS = {
     "x": sp.Symbol("x"),
     "Symbol": sp.Symbol,
-    "exp": sp.exp, "log": sp.log, "sqrt": sp.sqrt,
-    "sin": sp.sin, "cos": sp.cos, "tan": sp.tan,
+    "exp": sp.exp, "log": sp.log, "ln": sp.log, "sqrt": sp.sqrt,
+    "sin": sp.sin, "cos": sp.cos, "tan": sp.tan, "cot": sp.cot,
     "integrate": sp.integrate, "limit": sp.limit, "diff": sp.diff,
     "Matrix": sp.Matrix, "Rational": sp.Rational,
     "E": sp.E, "pi": sp.pi, "oo": sp.oo,
@@ -221,6 +221,11 @@ def clean_numeric(raw) -> str:
     if expr is None:
         return ""
     if not isinstance(expr, sp.Basic):
+        return ""
+    # zoo / nan / 无穷这类"求值出的怪东西"不是可判定的期望值
+    # （实测模型把"分子分母各是几"的答案写成 0/0 → sympify 出 zoo，
+    #  学生老老实实答 0 会被 same(0, zoo) 判成错）
+    if expr in (sp.zoo, sp.nan, sp.oo, -sp.oo):
         return ""
     # 关系式 / 布尔 / 集合不是"一个值"，别当答案用
     if (getattr(expr, "is_Boolean", False) or getattr(expr, "is_Relational", False)

@@ -116,7 +116,7 @@ class TestSessionFlow(APICase):
             if text == "1/2":
                 self.assertEqual(r.json()["next_action"], "self_assessment")
 
-        r = client.post(f"/api/sessions/{sid}/self-assessment", json={"score": 95})
+        r = client.post(f"/api/sessions/{sid}/self-assessment", json={"score": 5})
         self.assertEqual(r.status_code, 200)
         self.assertIn(r.json()["level"], ("red", "neutral", "green"))
 
@@ -147,6 +147,21 @@ class TestSessionFlow(APICase):
 
     def test_radar_unknown_session_404(self):
         self.assertEqual(client.get("/api/reports/nope/radar").status_code, 404)
+
+    def test_history_lists_sessions(self):
+        """首页「学习记录」：轻量列表，含刚做完的会话。"""
+        sid = self._create()
+        client.post(f"/api/sessions/{sid}/messages", json={"text": "0"})
+        r = client.get("/api/reports/history")
+        self.assertEqual(r.status_code, 200)
+        items = r.json()["sessions"]
+        self.assertTrue(items)
+        mine = next(x for x in items if x["id"] == sid)
+        self.assertEqual(mine["status"], "running")
+        self.assertEqual(mine["nodes_done"], 1)
+        self.assertGreaterEqual(mine["nodes_total"], 3)
+        self.assertIn("problem", mine)
+        self.assertIn("created_at", mine)
 
     def test_resume_after_restart(self):
         """清缓存= 服务重启，会话必须还能接着答。"""
