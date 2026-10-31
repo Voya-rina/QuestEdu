@@ -9,6 +9,14 @@ class CreateSessionReq(BaseModel):
     problem: str = ""
     problem_id: str | None = None
     user: str = Field(default="", max_length=64)   # 学习记录按用户分开保存
+    # 前端生成的本次拆题请求令牌：点"先不做了"时拿它来取消，
+    # 免得本地模型还在给一个已经没人等的请求卖力
+    req_id: str = Field(default="", max_length=64)
+
+
+class CancelReq(BaseModel):
+    """取消一次进行中的拆题请求（对应 CreateSessionReq.req_id）。"""
+    req_id: str = Field(min_length=4, max_length=64)
 
 
 class AnswerReq(BaseModel):

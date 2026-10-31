@@ -17,7 +17,7 @@ from app.core.judge import (
 )
 from app.data.problems import PROBLEMS
 
-LIMIT = PROBLEMS[0]["nodes"]
+LIMIT = next(p for p in PROBLEMS if p["id"] == "limit")["nodes"]
 
 
 class TestNormalize(unittest.TestCase):

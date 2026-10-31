@@ -155,12 +155,18 @@ def log_seq() -> int:
 # ---------------------------------------------------------------- 最近会话
 
 def recent_sessions(limit: int = 30) -> list[dict]:
-    """最近会话的轻量列表（与学习记录同一套字段思路，供控制台监控）。"""
+    """最近会话的轻量列表（与学习记录同一套字段思路，供控制台监控）。
+
+    控制台每 5 秒轮一次这里——顺手把超时的会话关掉，
+    学生忘了关的"进行中"不会永远挂着。
+    """
     from sqlalchemy import select
 
+    from app.core.store import store as _store
     from app.db import SessionLocal
     from app.models import SessionRow
 
+    _store.close_stale()
     with SessionLocal() as s:
         rows = s.scalars(
             select(SessionRow).order_by(SessionRow.created_at.desc()).limit(limit)
@@ -221,7 +227,8 @@ def session_detail(sid: str) -> dict | None:
         "problem": sess.problem,
         "subject": sess.plan.get("题型") or "",
         "mode": sess.mode,
-        "status": ("assessed" if sess.self_score is not None
+        "status": ("closed" if getattr(sess, "closed", False)
+                   else "assessed" if sess.self_score is not None
                    else "finished" if sess.finished else "running"),
         "progress": [min(sess.node_idx + 1, total), total] if total else [0, 0],
         "self_score": sess.self_score,
@@ -290,7 +297,9 @@ def stats(limit: int = 100) -> dict:
     total = len(rows)
     today = sum(1 for r in rows if r.created_at and r.created_at >= today0)
     running = sum(1 for r in rows if r.status == "running")
-    done = total - running
+    # 超时关闭的场次不算进"完答率"的分母完成项——它是被放弃的，不是被完成的
+    closed = sum(1 for r in rows if r.status == "closed")
+    done = total - running - closed
     with_variant = [r for r in rows
                     if isinstance(r.variant_result, dict)
                     and isinstance(r.variant_result.get("correct"), bool)]

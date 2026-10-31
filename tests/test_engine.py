@@ -51,8 +51,8 @@ class EngineCase(unittest.TestCase):
 
 
 class TestCreate(EngineCase):
-    def test_four_problems(self):
-        self.assertEqual(len(ALL_IDS), 4)
+    def test_problem_count(self):
+        self.assertEqual(len(ALL_IDS), 7)
 
     def test_payload_shape(self):
         sess, payload = Engine.create(problem_id="limit")
@@ -64,7 +64,7 @@ class TestCreate(EngineCase):
 
     def test_unknown_id_falls_back_to_first(self):
         sess, payload = Engine.create(problem_id="不存在")
-        self.assertEqual(payload["problem_id"], "limit")
+        self.assertEqual(payload["problem_id"], PROBLEMS[0]["id"])
 
     def test_standard_answer_never_sent(self):
         """护城河：学生拿到的 JSON 里不能出现标准答案字段。"""

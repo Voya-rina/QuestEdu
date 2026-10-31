@@ -37,9 +37,11 @@ def history(limit: int = 30, user: str = "", request: Request = None):
     """
     from sqlalchemy import select
 
+    from app.core.store import store as _store
     from app.db import SessionLocal
     from app.models import SessionRow
 
+    _store.close_stale()      # 打开列表前先关掉超时挂着的"进行中"
     if request is not None and not user.strip() and not _is_controller(request):
         raise HTTPException(403, "学习记录按用户查询，请带上 user 参数")
 
@@ -63,7 +65,7 @@ def history(limit: int = 30, user: str = "", request: Request = None):
             "subject": r.subject or r.problem_id or "自定义题",
             "problem": r.problem,
             "mode": r.mode,
-            "status": r.status,                     # running / finished / assessed
+            "status": r.status,                     # running / finished / assessed / closed
             "self_score": r.self_score,
             "created_at": r.created_at.isoformat(timespec="seconds"),
             "nodes_done": len(done),

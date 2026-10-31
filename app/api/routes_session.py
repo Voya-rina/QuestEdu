@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.api.schemas import AnswerReq, AssessReq, CreateSessionReq
-from app.core import access, console_data
+from app.api.schemas import AnswerReq, AssessReq, CancelReq, CreateSessionReq
+from app.core import access, console_data, llm
 from app.core.engine import Engine
 from app.core.store import session_lock, store
 
@@ -34,15 +34,30 @@ def create_session(req: CreateSessionReq, request: Request):
         perm = "server"
     else:
         perm = console_data.device_perm(_client_ip(request))
+    cancel = llm.cancel_register(req.req_id) if req.req_id else None
     try:
         sess, payload = Engine.create(
             req.problem.strip(), req.problem_id, req.user.strip(),
             mode="mock" if perm == "mock" else "",
+            cancel=cancel,
         )
     except Exception as e:
         raise HTTPException(400, f"拆题失败：{str(e)[:300]}")
+    finally:
+        if req.req_id:
+            llm.cancel_unregister(req.req_id)
+    # 学生中途点了"先不做了"：模型就算已经算完也不入库、不返回，
+    # 否则会话列表里会躺着一场没人要的会话
+    if cancel is not None and cancel.is_set():
+        raise HTTPException(400, "拆题已取消")
     store.save(sess)
     return payload
+
+
+@router.post("/cancel")
+def cancel_session(req: CancelReq):
+    hit = llm.cancel_trigger(req.req_id)
+    return {"ok": True, "hit": hit}
 
 
 @router.get("/{sid}")

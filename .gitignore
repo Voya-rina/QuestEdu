@@ -22,6 +22,8 @@ data/*.json
 
 # log
 *.log
+*.log.1
+*.log.2
 
 # ---- 测试 / 工具缓存 ----
 .pytest_cache/

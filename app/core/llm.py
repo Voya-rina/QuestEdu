@@ -38,7 +38,8 @@ _call_lock = threading.Lock()
 
 
 def _log_call(route: dict, ok: bool, ms: int, n_in: int, n_out: int,
-              err: str = "", reply: str = "") -> None:
+              err: str = "", reply: str = "",
+              tin: int | None = None, tout: int | None = None) -> None:
     global _call_seq
     with _call_lock:
         _call_seq += 1
@@ -47,6 +48,9 @@ def _log_call(route: dict, ok: bool, ms: int, n_in: int, n_out: int,
             "ts": datetime.now().strftime("%H:%M:%S"),
             "route": route["name"], "model": route["model"],
             "ok": ok, "ms": ms, "in": n_in, "out": n_out,
+            # 端点给的 usage 里的真实 token 数；拿不到（失败/非标准端点）为 None，
+            # 前端回退显示字符数
+            "tin": tin, "tout": tout,
             "err": (err or "")[:300],
             "reply": (reply or "")[:800],
         })
@@ -82,6 +86,44 @@ def _prompt_chars(messages: list) -> int:
 # N 可用环境变量 LLM_LOCAL_CONCURRENCY 调（跑得动的机器可以调大）。
 _LOCAL_SEM = threading.Semaphore(max(1, int(os.environ.get("LLM_LOCAL_CONCURRENCY", "1") or 1)))
 _JSON_BLOCK = re.compile(r"\{.*\}", re.S)
+
+# ---------------------------------------------------------------- 取消
+# 学生点"先不做了"后，浏览器那头已经走了，服务端这头却还在慢悠悠地拆题、
+# 还占着本地模型的队列。这里给每个拆题请求发一个 Event 令牌：路由层注册，
+# 前端放弃时触发；LLM 链路在排队前/排队中/每个端点尝试前检查，命中就中止。
+# 局限：一次已经开始的 HTTP 推理（同步 httpx 阻塞读）无法中途打断——
+# 等它跑完后结果会被上层丢弃，且不再占用队列。
+_cancel_events: dict[str, threading.Event] = {}
+_cancel_lk = threading.Lock()
+
+
+def cancel_register(token: str) -> threading.Event:
+    """为一次请求登记取消令牌；返回 Event 供各检查点查询。"""
+    with _cancel_lk:
+        ev = _cancel_events.get(token)
+        if ev is None:
+            ev = threading.Event()
+            _cancel_events[token] = ev
+        return ev
+
+
+def cancel_unregister(token: str) -> None:
+    with _cancel_lk:
+        _cancel_events.pop(token, None)
+
+
+def cancel_trigger(token: str) -> bool:
+    """标记该请求已取消（前端"先不做了"时调用）。"""
+    with _cancel_lk:
+        ev = _cancel_events.get(token)
+    if ev is None:
+        return False
+    ev.set()
+    return True
+
+
+def _cancelled(cancel: threading.Event | None) -> bool:
+    return cancel is not None and cancel.is_set()
 
 
 def last_reply() -> str:
@@ -347,13 +389,15 @@ def _strip_fence(text: str) -> str:
 
 
 def chat(system: str, user: str, temperature: float = 0.3,
-         max_tokens: int | None = None) -> str:
+         max_tokens: int | None = None,
+         cancel: threading.Event | None = None) -> str:
     """纯文本对话。max_tokens 给本地小模型拴上缰绳：它一跑飞就是几千 token，
     学生要等几分钟还什么都得不到。"""
     return _post(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature,
         max_tokens=max_tokens,
+        cancel=cancel,
     )
 
 
@@ -376,7 +420,8 @@ def chat_vision(system: str, user: str, image_b64: str, mime: str = "image/png",
 
 
 def _post(messages: list, temperature: float, routes: list[dict] | None = None,
-          max_tokens: int | None = None) -> str:
+          max_tokens: int | None = None,
+          cancel: threading.Event | None = None) -> str:
     routes = _routes() if routes is None else routes
     if not routes:
         raise LLMError("未配置 LLM（当前模式 %s）" % mode())
@@ -384,8 +429,10 @@ def _post(messages: list, temperature: float, routes: list[dict] | None = None,
     errors: list[str] = []
     all_timeout = True
     for route in routes:
+        if _cancelled(cancel):
+            raise LLMError("请求已取消")
         try:
-            out = _send(route, messages, temperature, max_tokens)
+            out = _send(route, messages, temperature, max_tokens, cancel=cancel)
             globals()["_last_raw"] = out
             return out
         except LLMTimeout as e:
@@ -403,31 +450,39 @@ def _post(messages: list, temperature: float, routes: list[dict] | None = None,
 
 
 def _send(route: dict, messages: list, temperature: float,
-          max_tokens: int | None = None) -> str:
+          max_tokens: int | None = None,
+          cancel: threading.Event | None = None) -> str:
     """发给单个端点。本地端点先过并发闸门（见 _LOCAL_SEM），云端不排队。"""
+    if _cancelled(cancel):
+        raise LLMError("请求已取消")
     if route["name"] != "local":
         return _send_http(route, messages, temperature, max_tokens)
-    if _LOCAL_SEM.acquire(timeout=0.2):        # 空闸门：直接进，不刷日志
-        try:
-            return _send_http(route, messages, temperature, max_tokens)
-        finally:
-            _LOCAL_SEM.release()
-    log.info("本地端点忙，请求排队等待…")
+    # 闸门先抢一次；没抢到就循环短等，每 0.5 秒看一眼取消标志——
+    # 否则一个学生已经放弃的请求还会在队列里占坑
     t_q = time.time()
-    _LOCAL_SEM.acquire()
+    queued = not _LOCAL_SEM.acquire(timeout=0.2)
+    if queued:
+        log.info("本地端点忙，请求排队等待…")
+        while not _LOCAL_SEM.acquire(timeout=0.5):
+            if _cancelled(cancel):
+                raise LLMError("请求已取消")
     try:
-        waited = time.time() - t_q
-        if waited >= 1:
-            log.info("本地端点排队 %.0f 秒后轮到本请求", waited)
-        return _send_http(route, messages, temperature, max_tokens)
+        if queued:
+            waited = time.time() - t_q
+            if waited >= 1:
+                log.info("本地端点排队 %.0f 秒后轮到本请求", waited)
+        return _send_http(route, messages, temperature, max_tokens, cancel=cancel)
     finally:
         _LOCAL_SEM.release()
 
 
 def _send_http(route: dict, messages: list, temperature: float,
-               max_tokens: int | None = None) -> str:
+               max_tokens: int | None = None,
+               cancel: threading.Event | None = None) -> str:
     import httpx  # 延迟导入：离线模式完全不需要
 
+    if _cancelled(cancel):
+        raise LLMError("请求已取消")
     headers = {"Content-Type": "application/json"}
     headers["Authorization"] = f"Bearer {route['api_key']}"
     payload = {
@@ -471,12 +526,16 @@ def _send_http(route: dict, messages: list, temperature: float,
         except Exception:
             raise LLMError(f"返回格式不认识：{r.text[:200]}")
         _last_usage.clear()
-        _last_usage.update(body.get("usage") or {})
+        usage = body.get("usage") or {}
+        _last_usage.update(usage)
         globals()["_last_route"] = {"name": route["name"], "model": route["model"]}
         out = content_of(choice)
         log.info("LLM %s · %s · %dms · 回复 %d 字",
                  route["name"], route["model"], int((time.time() - t0) * 1000), len(out))
-        _log_call(route, True, int((time.time() - t0) * 1000), prompt_chars, len(out), reply=out)
+        _log_call(route, True, int((time.time() - t0) * 1000), prompt_chars, len(out),
+                  reply=out,
+                  tin=int(usage.get("prompt_tokens") or 0) or None,
+                  tout=int(usage.get("completion_tokens") or 0) or None)
         return out
     except LLMError as e:
         _log_call(route, False, int((time.time() - t0) * 1000), prompt_chars, 0, err=str(e))
@@ -551,7 +610,8 @@ def parse_json(raw: str) -> dict | None:
 
 
 def chat_json(system: str, user: str, retries: int | None = None,
-              temperature: float = 0.2, max_tokens: int | None = None) -> dict:
+              temperature: float = 0.2, max_tokens: int | None = None,
+              cancel: threading.Event | None = None) -> dict:
     """强制 JSON 输出。解析失败自动重试（大纲：结构化输出约束）。
 
     但**本地只重试一次**，超时则完全不重试：
@@ -573,7 +633,8 @@ def chat_json(system: str, user: str, retries: int | None = None,
         if attempt:
             prompt = system + ("\n\n上一次输出不是合法 JSON。只输出 JSON 对象本身，"
                                "不要 Markdown 代码块、不要任何解释文字。")
-        raw = chat(prompt, user, temperature=temperature, max_tokens=max_tokens)
+        raw = chat(prompt, user, temperature=temperature, max_tokens=max_tokens,
+                   cancel=cancel)
         data = parse_json(raw)
         if data is not None:
             return data

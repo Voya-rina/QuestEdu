@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy import delete, select
@@ -30,6 +30,10 @@ from app.core.engine import Engine, Session
 _sess_locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
+# 进行中的会话这么久没有任何新消息（作答/回复都算），就自动关闭——
+# 学生关了页面忘掉的会话不该永远挂在"进行中"里
+STALE_SESSION_MINUTES = 30
+
 
 def session_lock(sid: str) -> threading.Lock:
     with _locks_guard:
@@ -40,6 +44,22 @@ class MemoryStore:
     def __init__(self) -> None:
         self._data: dict[str, Session] = {}
         self._deleted: set[str] = set()
+
+    def close_stale(self, minutes: float = STALE_SESSION_MINUTES) -> int:
+        """超时关闭：进行中且最近 messages 时间早于 cutoff 的会话标记 closed。"""
+        cutoff = datetime.now() - timedelta(minutes=minutes)
+        n = 0
+        for s in self._data.values():
+            if s.closed or s.finished or s.self_score is not None:
+                continue
+            last = s.history[-1]["at"] if s.history else s.created_at
+            try:
+                if datetime.fromisoformat(str(last)) < cutoff:
+                    s.closed = True
+                    n += 1
+            except Exception:
+                continue
+        return n
 
     def save(self, sess: Session) -> None:
         # 删除后在途请求晚到落盘会把会话整体写回——墓碑拦掉，删除才算删干净
@@ -119,7 +139,9 @@ class SqlStore:
             row.problem = sess.problem
             row.problem_id = sess.problem_id
             row.mode = sess.mode
-            row.status = ("assessed" if sess.self_score is not None
+            # 超时关闭优先：一旦判 closed，后续落盘不能再把它写回 running
+            row.status = ("closed" if sess.closed
+                          else "assessed" if sess.self_score is not None
                           else "finished" if sess.finished else "running")
             row.plan = sess.plan
             row.results = sess.results
@@ -252,6 +274,7 @@ class SqlStore:
             warning=row.warning,
             variant=row.variant,
             variant_result=row.variant_result,
+            closed=(row.status == "closed"),
             created_at=row.created_at.isoformat(timespec="seconds"),
         )
 
@@ -260,6 +283,37 @@ class SqlStore:
             return True
         with self._db.SessionLocal() as s:
             return s.get(self._SessionRow, sid) is not None
+
+    def close_stale(self, minutes: float = STALE_SESSION_MINUTES) -> int:
+        """超时关闭：status=running 且最后一条消息早于 cutoff 的会话标记 closed。
+
+        「无响应」按最后一条消息（作答/回复都算）的时间算，而不是会话创建时间。
+        """
+        cutoff = datetime.now() - timedelta(minutes=minutes)
+        victims: list[str] = []
+        with self._db.SessionLocal() as s:
+            running = s.scalars(
+                select(self._SessionRow.id).where(self._SessionRow.status == "running")
+            ).all()
+            for sid in running:
+                last = s.scalars(
+                    select(self._MessageRow.created_at)
+                    .where(self._MessageRow.session_id == sid)
+                    .order_by(self._MessageRow.created_at.desc()).limit(1)
+                ).first()
+                if last is None:
+                    last = s.get(self._SessionRow, sid).created_at
+                if last is not None and last.replace(tzinfo=None) < cutoff:
+                    victims.append(sid)
+            for sid in victims:
+                s.get(self._SessionRow, sid).status = "closed"
+            if victims:
+                s.commit()
+        for sid in victims:      # 缓存里的活对象同步标记，后续 save 不会写回 running
+            csess = self._cache.get(sid)
+            if csess is not None:
+                csess.closed = True
+        return len(victims)
 
     def count(self) -> int:
         with self._db.SessionLocal() as s:

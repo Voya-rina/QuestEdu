@@ -46,11 +46,11 @@ class TestMeta(APICase):
         self.assertEqual(by_id["eigen"]["category"], "线性代数")
         self.assertEqual(by_id["limit"]["category"], "微积分")
 
-    def test_info_lists_four_problems(self):
+    def test_info_lists_all_problems(self):
         r = client.get("/api/info")
         self.assertEqual(r.status_code, 200)
         data = r.json()
-        self.assertEqual(len(data["problems"]), 4)
+        self.assertEqual(len(data["problems"]), 7)
         self.assertIn("llm", data)
         self.assertNotIn("_answer", str(data))
 

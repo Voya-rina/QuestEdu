@@ -514,7 +514,6 @@ button{width:100%;margin-top:12px;padding:14px;border:0;border-radius:14px;backg
 </style></head><body>
 <form method="post" action="/__gate">
   <h1>输入访问码</h1>
-  <p>这个入口公网可访问，输一次就记住你了。</p>
   <input name="code" inputmode="numeric" pattern="[0-9]*" maxlength="4"
          autofocus autocomplete="off" aria-label="访问码">
   <button type="submit">进入</button>

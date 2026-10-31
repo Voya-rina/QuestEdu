@@ -88,6 +88,7 @@ class Session:
     warning: dict | None = None
     variant: dict | None = None
     variant_result: dict | None = None
+    closed: bool = False             # 超时自动关闭（30 分钟无任何作答/回复）
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 
     @property
@@ -298,7 +299,7 @@ def _build_nodes(raw_nodes: list, meta: dict, budget: int) -> list[dict]:
     return nodes
 
 
-def cloud_plan(problem: str) -> dict:
+def cloud_plan(problem: str, cancel=None) -> dict:
     budget = _plan_budget()
     system = PLAN_SYSTEM.replace("__BUDGET__", str(budget))
     user = f"题目：\n{problem}\n\n节点数不超过 {budget} 个。"
@@ -313,7 +314,7 @@ def cloud_plan(problem: str) -> dict:
             # 不设 max_tokens：实测这类小模型先写上千 token 的 reasoning 再出正文，
             # 上限会把正文拦腰截断（JSON 断在半截 → 解析失败 → 白白重试）。
             # 脱缰输出靠超时和降级兜底，不靠砍预算。
-            data = llm.chat_json(system, user)
+            data = llm.chat_json(system, user, cancel=cancel)
         except llm.LLMError as e:
             # 整段 JSON 救不回来时，退回"按字段名捞问句"
             raw_text = str(e)
@@ -375,7 +376,7 @@ class Engine:
 
     @staticmethod
     def create(problem: str = "", problem_id: str | None = None,
-               user: str = "", mode: str = "") -> tuple[Session, dict]:
+               user: str = "", mode: str = "", cancel=None) -> tuple[Session, dict]:
         forced_mock = mode == "mock"
         use_demo = forced_mock or not llm.online()
         plan_fallback = False
@@ -388,7 +389,7 @@ class Engine:
             if not (problem or "").strip():
                 problem = get_problem(problem_id)["latex"]
             try:
-                plan = cloud_plan(problem)
+                plan = cloud_plan(problem, cancel=cancel)
             except Exception:
                 # 模型拆题失败（超时/JSON 连续失败/网络断）：内置题直接用
                 # 它的讲解脚本兜底，别让流程死在起点；自定义题没有脚本可用，

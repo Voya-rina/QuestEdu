@@ -121,6 +121,20 @@ def print_qr(url: str) -> None:
     qr.print_ascii(invert=True)
 
 
+def minimize_console() -> None:
+    """Web 已经在浏览器里打开了，把黑窗收进任务栏（最小化，不是隐藏——
+    停服务要 Ctrl+C，出错信息也得有地方看，所以不能真藏起来）。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 6)      # SW_MINIMIZE
+    except Exception:
+        pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="QuestEdu 学问 开发服务器")
     parser.add_argument("--host", default="0.0.0.0")
@@ -167,7 +181,8 @@ def main() -> None:
     print("\n按 Ctrl+C 停止\n")
 
     if not args.no_open:
-        threading.Timer(1.2, lambda: webbrowser.open(local)).start()
+        # 开浏览器顺带把控制台窗口最小化：页面都开了，黑窗没必要继续占地方
+        threading.Timer(1.2, lambda: (webbrowser.open(local), minimize_console())).start()
 
     import uvicorn
 

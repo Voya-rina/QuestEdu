@@ -194,6 +194,19 @@ textarea:focus{border-color:#BFC8F5}
   flex:0 0 auto;width:48px;height:44px;border-radius:var(--r-md);border:0;background:var(--brand);
   color:#fff;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;
 }
+/* 输入辅助条：数学符号塞进光标处，横滑 */
+.sym-strip{
+  display:flex;gap:6px;overflow-x:auto;padding:2px 2px 8px;
+  flex:0 0 auto;scrollbar-width:none;
+}
+.sym-strip::-webkit-scrollbar{display:none}
+.sym{
+  flex:none;min-width:40px;padding:4px 10px;border:1px solid var(--line);
+  border-radius:var(--r-sm);background:#fff;font-size:13.5px;color:var(--ink);
+  font-family:inherit;cursor:pointer;line-height:1.4;
+}
+.sym:active{background:var(--brand-soft);border-color:var(--brand)}
+
 .send:disabled{background:#C9CEDA}
 
 .sheet{
@@ -299,10 +312,10 @@ input[type=range]::-webkit-slider-thumb{
 .sheet-scroll .sub{margin:8px 0 0}
 .sheet-scroll .fl:first-child{margin-top:8px}
 .sheet-scroll .lmsg{margin:16px 0 2px}
-/* 设置面板从顶部展开；底部弹层（报告/自评/确认）保持原样 */
+/* 设置面板从顶部展开（四角圆角、顶部留一点悬浮距离）；底部弹层保持原样 */
 .sheet.top{align-items:flex-start}
 .sheet.top .sheet-body{
-  border-radius:0 0 22px 22px;
+  border-radius:22px;margin-top:10px;overflow:hidden;
   animation:down .28s cubic-bezier(.22,1,.36,1) both;
 }
 @keyframes down{from{transform:translateY(-40px)}to{transform:none}}
@@ -648,6 +661,18 @@ input[type=range]::-webkit-slider-thumb{
 
   <footer id="footer">
     <div class="choices" id="choices"></div>
+    <div class="sym-strip" id="sym-strip">
+      <button class="sym" data-s="x^2">x²</button>
+      <button class="sym" data-s="^3">^3</button>
+      <button class="sym" data-s="^{}" data-back="1">^{}</button>
+      <button class="sym" data-s="_{}" data-back="1">_{}</button>
+      <button class="sym" data-s="sqrt()" data-back="1">√()</button>
+      <button class="sym" data-s="1/2">1/2</button>
+      <button class="sym" data-s="/">/</button>
+      <button class="sym" data-s="()" data-back="1">( )</button>
+      <button class="sym" data-s="pi">π</button>
+      <button class="sym" data-s="-">−</button>
+    </div>
     <div class="composer">
       <textarea id="input" rows="1" placeholder="说说你的想法…"></textarea>
       <button class="send" id="send">发送</button>
@@ -1406,6 +1431,16 @@ async function boot(){
   // 取消等待：本地模型慢，得给人一条退路
   $('#wait-cancel').onclick = () => {
     if(WAIT_ABORT){ WAIT_ABORT.abort(); WAIT_ABORT = null; }
+    // 别只 abort 浏览器这头：告诉服务端这次拆题不要了，
+    // 不然本地模型还在队列里为一个没人等的请求卖力
+    if(WAIT_REQ){
+      try{
+        fetch('/api/sessions/cancel', {method:'POST', keepalive:true,
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({req_id: WAIT_REQ})});
+      }catch(e){}
+      WAIT_REQ = '';
+    }
     stopWait();
   };
 
@@ -2275,16 +2310,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
 let WAIT_ABORT = null;
+let WAIT_REQ = '';          // 本次拆题的服务端取消令牌（见 /api/sessions/cancel）
 
 async function start(pid, btn, problem){
   if(btn) btn.disabled = true;
   const ac = new AbortController();
   WAIT_ABORT = ac;
+  WAIT_REQ = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const slow = (MODE === 'local' || MODE === 'hybrid');
   startWait('正在拆题…',
     slow ? '本地模型正在读题、拆步骤，第一次还会加载模型，可能要一两分钟。' : '');
   try{
-    const d = await api('/api/sessions', {problem_id: pid || null, problem: problem || '', user: USER}, ac.signal);
+    const d = await api('/api/sessions', {problem_id: pid || null, problem: problem || '', user: USER, req_id: WAIT_REQ}, ac.signal);
     SID = d.session_id;
     $('#home').style.display = 'none';
     const plain = (d.problem || '').indexOf('$') < 0;
@@ -2310,6 +2347,7 @@ async function start(pid, btn, problem){
   }finally{
     stopWait();
     WAIT_ABORT = null;
+    WAIT_REQ = '';
   }
 }
 
@@ -2318,6 +2356,22 @@ const input = $('#input');
 input.addEventListener('input', () => {
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 110) + 'px';
+});
+
+/* 输入辅助条：点一下把符号塞进光标处（手机键盘打 ^ {} 这类太费劲） */
+function insertAtCursor(el, text, back){
+  const st = el.selectionStart ?? el.value.length;
+  const en = el.selectionEnd ?? st;
+  el.value = el.value.slice(0, st) + text + el.value.slice(en);
+  const np = st + text.length - (back || 0);
+  el.setSelectionRange(np, np);
+  el.focus();
+}
+$('#sym-strip').addEventListener('pointerdown', e => {
+  const b = e.target.closest('.sym');
+  if(!b) return;
+  e.preventDefault();          // 别让点按钮把输入框焦点抢走
+  insertAtCursor(input, b.dataset.s, +(b.dataset.back || 0));
 });
 
 async function send(){
@@ -2446,7 +2500,7 @@ async function sendVariant(text){
 }
 
 /* ---------- 学习记录 + 学习报告（同一个面板的两个视图） ---------- */
-const HIST_STATUS = {running: '进行中', finished: '已完成', assessed: '已自评'};
+const HIST_STATUS = {running: '进行中', finished: '已完成', assessed: '已自评', closed: '已超时'};
 
 function showHistView(which){
   const list = which === 'list';
