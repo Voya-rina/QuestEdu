@@ -369,6 +369,41 @@ def _salvage_last_reply() -> list[dict]:
     return extract_questions(raw) if raw else []
 
 
+VARIANT_TRANSLATE_SYSTEM = """你是数学表述翻译器。把学生对变式题的回答翻译成一个 SymPy 表达式。只输出 JSON，不要解释。
+
+输入三段：
+【变式题】题目
+【SymPy 标准答案】仅供对照记号风格，不许泄露给学生、也不用你判对错
+【学生的回答】翻译对象（可能来自语音输入，写法口语化）
+
+翻译规则：
+- 语音口语先翻成符号："五倍x的四次方"=5*x**4、"3x方"=3*x**2、
+  "x的三次方"=x**3、"负"=负号、中文数字=阿拉伯数字、"X"=x
+- 分段描述（"x大于零时是…，x小于零时是…"）合成一个表达式，奇偶/符号类可用 sign(x)，
+  绝对值用 Abs(x)
+- 只翻译学生自己说的内容，绝不补全、绝不纠正；翻不出来（不是数学表达式）expr 给空串
+- 变量只用 x；乘号写 *，幂用 **；纯 ASCII
+
+输出：{"expr":"5*x**4*sign(x)"}"""
+
+
+def _translate_variant_answer(sess, text: str):
+    """把学生的口语/分段式回答翻译成 SymPy 表达式（判定仍由符号引擎做）。"""
+    v = sess.variant or {}
+    user = (f"【变式题】{v.get('problem', '')}\n"
+            f"【SymPy 标准答案】{v.get('answer_plain', '')}\n"
+            f"【学生的回答】{text}")
+    try:
+        data = llm.chat_json(VARIANT_TRANSLATE_SYSTEM, user, retries=2)
+    except llm.LLMError as e:
+        log.warning("会话 %s 变式回答翻译失败：%s", sess.id, str(e)[:120])
+        return None
+    expr = str(data.get("expr", "") or "").strip()
+    if not expr:
+        return None
+    return mathcheck.parse_student_expr(expr)
+
+
 # ---------------------------------------------------------------- 引擎
 
 class Engine:
@@ -712,6 +747,15 @@ class Engine:
             got = mathcheck.parse_student_expr(text)
         else:
             got = mathcheck.number_in(text)
+        # SymPy 解析不出来（语音输入的分段描述最典型："x大于零时是五倍x四次方，
+        # x小于零时是负5倍x的四次方"）且在线：让模型**只做翻译**，把学生的回答
+        # 翻成 SymPy 表达式，对错仍然由符号引擎判——模型不经手判定结果。
+        # 含中文的回答优先走翻译：数字抽取对语音文本不可靠，容易抽错数字直接判错。
+        if (want is not None and mathcheck.has_cjk(text)
+                and llm.online() and sess.mode != "mock"):
+            translated = _translate_variant_answer(sess, text)
+            if translated is not None:
+                got = translated
         correct = mathcheck.same(got, want)
         sess.variant_result = {
             "text": text,

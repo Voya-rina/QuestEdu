@@ -62,10 +62,16 @@ def _kind(ua: str) -> str:
 
 def touch(ip: str, user: str = "", ua: str = "", sid: str = "",
           cur=None, total=None) -> None:
-    """记录/刷新一台设备的心跳。"""
+    """记录/刷新一台设备的心跳。
+
+    每次**新连接**（90 秒内没见过）都把该设备权限重置回 MOCK：
+    授权只在设备持续在线期间有效，重连一律从离线题库重新开始——
+    控制台要给谁开服务端权限，就趁它在线时再点一次。
+    """
     now = time.time()
     with _lock:
         prev = _devices.get(ip) or {}
+        fresh = (not prev) or (now - prev.get("seen", 0) > ONLINE_WINDOW)
         _devices[ip] = {
             "ip": ip,
             "user": (user or "").strip()[:64] or prev.get("user", ""),
@@ -76,6 +82,17 @@ def touch(ip: str, user: str = "", ua: str = "", sid: str = "",
             "seen": now,
             "first": prev.get("first", now),
         }
+    if fresh:
+        _reset_perm(ip)
+
+
+def _reset_perm(ip: str) -> None:
+    with _PERM_LOCK:
+        if _PERMS.pop(ip, None) is not None:
+            try:
+                _PERM_FILE.write_text(json.dumps(sorted(_PERMS)), encoding="utf-8")
+            except Exception:
+                pass
 
 
 def _row(d: dict, now: float, online: bool) -> dict:

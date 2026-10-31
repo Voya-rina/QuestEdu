@@ -617,6 +617,11 @@ input[type=range]::-webkit-slider-thumb{
     <div class="brand">学问<em>QUESTEDU</em></div>
     <button class="user-chip" id="user-chip" style="display:none"></button>
     <div class="dots" id="dots"><span class="count" id="count"></span></div>
+    <button class="gear" id="refresh-btn" aria-label="刷新页面">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>
+      </svg>
+    </button>
     <button class="gear" id="qr-btn" aria-label="扫码在手机上打开">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>
@@ -1202,12 +1207,25 @@ function commitUser(){
   heartbeat();    // 换人立即上报，控制台的设备列表马上跟上
 }
 
-/* ---------- 心跳：控制台"在线设备与用户"的数据源 ---------- */
+/* ---------- 心跳：控制台"在线设备与用户"的数据源 ----------
+ * 响应里带本设备的生效方案：控制台改了权限/换了方案，
+ * 这里感知到变化就重拉题库和控件显隐——不用重新扫码。 */
+let EFFECTIVE = '';
 function heartbeat(){
   try{
     fetch('/api/heartbeat', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({user: USER, sid: SID || '', cur: LAST_CUR, total: LAST_TOTAL}),
+    }).then(r => r.ok ? r.json() : null).then(d => {
+      if(!d || !d.perm) return;
+      const sig = [d.perm, d.mode, d.ready ? 1 : 0, d.vision_ready ? 1 : 0].join(':');
+      if(EFFECTIVE && sig !== EFFECTIVE){
+        refreshHome();
+        toast(d.mode === 'mock' ? '本设备已切回离线题库（MOCK）'
+                                : '本设备已获得「' + d.mode + '」方案权限',
+              d.mode === 'mock' ? '' : 'ok');
+      }
+      EFFECTIVE = sig;
     }).catch(() => {});
   }catch(e){}
 }
@@ -2373,6 +2391,12 @@ $('#sym-strip').addEventListener('pointerdown', e => {
   e.preventDefault();          // 别让点按钮把输入框焦点抢走
   insertAtCursor(input, b.dataset.s, +(b.dataset.back || 0));
 });
+
+/* 右上角刷新：重新拉题库与配置；正在做题时先确认，别一挥手就丢进度 */
+$('#refresh-btn').onclick = () => {
+  if(PHASE !== 'home' && !confirm('刷新会回到题目列表，这道题的进度不会带到新页面。确定刷新吗？')) return;
+  location.reload();
+};
 
 async function send(){
   const text = input.value.trim();

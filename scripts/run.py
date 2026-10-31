@@ -181,8 +181,9 @@ def main() -> None:
     print("\n按 Ctrl+C 停止\n")
 
     if not args.no_open:
+        threading.Timer(1.2, lambda: webbrowser.open(local)).start()
         # 开浏览器顺带把控制台窗口最小化：页面都开了，黑窗没必要继续占地方
-        threading.Timer(1.2, lambda: (webbrowser.open(local), minimize_console())).start()
+        # threading.Timer(1.2, lambda: (webbrowser.open(local), minimize_console())).start()
 
     import uvicorn
 

@@ -69,6 +69,58 @@ def _context_ok(text: str, start: int, end: int) -> bool:
 _FRAC_TEX = re.compile(r"\\[dt]?frac\{([^{}]+)\}\{([^{}]+)\}")
 _FULL_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 
+# ---------------------------------------------------------------- 语音口语 → 符号
+#
+# 语音输入转文字常写成"五倍x的四次方""3x方""负12"——直接进不了 SymPy，
+# 判定只能要求学生重打一遍。这里做一轮**保守**的口语翻译：只翻有把握的模式
+# （中文数字、N次方/平方/立方、N倍、负号），翻不动的原样放过，
+# 交给下一层（关键词匹配 / 语义判定）——宁可少翻一层，不可瞎翻。
+
+_CN_DIGIT_MAP = {"零": "0", "一": "1", "二": "2", "两": "2", "三": "3",
+                 "四": "4", "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"}
+# 含"十"的组合先处理（十五→15、二十→20），再单字替换
+_CN_TEN = re.compile(r"([零一二两三四五六七八九]?)十([零一二两三四五六七八九]?)")
+
+_VOICE_POW = re.compile(r"([0-9xX)）])\s*的?\s*([0-9]+)\s*次[方幂]")     # x的4次方 → x^4
+_VOICE_LIFANG = re.compile(r"([0-9xX)）])\s*的?\s*立方")                  # x立方 → x^3
+_VOICE_PINGFANG = re.compile(r"([0-9xX)）])\s*的?\s*平方")                # x的平方 → x^2
+# 语音里的"方"几乎都是"平方"的尾巴（3x方→3x^2）；但要避开"方程""方面"这些词
+_VOICE_FANG = re.compile(r"([0-9xX)）])方(?![程面式向法便圆格针言阵块])")
+_VOICE_BEI = re.compile(r"([0-9])\s*倍\s*之?")                            # 5倍x → 5*x
+_VOICE_FU = re.compile(r"负(?=[0-9])")                                    # 负12 → -12
+_NEG_CN = re.compile(r"负\s*([零一二两三四五六七八九十]+|[\d.]+)")          # 负十二 → -12
+
+
+def has_cjk(s: str) -> bool:
+    """这段话里有没有汉字——有的话多半是语音转文字的自然语言表述。"""
+    return bool(_CJK.search(str(s or "")))
+
+
+def _cn_to_digits(s: str) -> str:
+    def ten(m):
+        a = _CN_DIGIT_MAP.get(m.group(1), "1") if m.group(1) else "1"
+        b = _CN_DIGIT_MAP.get(m.group(2), "0") if m.group(2) else ""
+        return a + b
+    s = _CN_TEN.sub(ten, s)
+    for k, v in _CN_DIGIT_MAP.items():
+        s = s.replace(k, v)
+    return s.replace("零", "0")
+
+
+def voice_to_expr(s: str) -> str:
+    """把语音输入常见的中文数学口语翻成符号写法；不是口语的原样返回。"""
+    s = str(s or "")
+    if not _CJK.search(s) and "负" not in s:
+        return s.translate(_FULL_DIGITS)      # 纯 ASCII 快速通道
+    s = _cn_to_digits(s)
+    s = _VOICE_POW.sub(r"\1^\2", s)
+    s = _VOICE_LIFANG.sub(r"\1^3", s)
+    s = _VOICE_PINGFANG.sub(r"\1^2", s)
+    s = _VOICE_FANG.sub(r"\1^2", s)
+    s = _VOICE_BEI.sub(r"\1*", s)
+    s = _VOICE_FU.sub("-", s)
+    return s.translate(_FULL_DIGITS)
+
 # 受限命名空间：只放数学对象，不放 __import__ / open / eval 可达的东西
 _EVAL_NS = {
     # 实数域符号：学校数学只在实数里做。默认的复数域 Symbol 会让
@@ -127,9 +179,15 @@ def number_in(text: str):
     text = (text or "").translate(_FULL_DIGITS)   # ２ → 2，否则 sympify 出来不是整数
     text = _FRAC_TEX.sub(r"\1/\2", text)          # \frac{1}{2} → 1/2
 
+    # 中文分数词先查（"二分之一"不能被口语翻译拆成 2分之1）
     for word, val in _CN_WORDS:
         if word in text:
             return val
+
+    # 语音口语的**窄**翻译：只处理"负 + 中文数字"（负十二 → -12）。
+    # 不能在这里做整体中文数字转换——"二阶""三分之二"会被抽出错误的数字，
+    # 反而把答对的学生判错。表达式级的口语翻译在 parse_student_expr 里做。
+    text = _NEG_CN.sub(lambda m: "-" + _cn_to_digits(m.group(1)), text)
 
     spans = []
     for pat in (_FRAC, _DEC):
@@ -210,6 +268,7 @@ def parse_student_expr(s: str):
     if not s or len(s) > 80:
         return None
     s = s.translate(_FULL)
+    s = voice_to_expr(s)             # 语音口语：3x方 → 3x^2、五倍x的四次方 → 5*x^4
     s = (s.replace("×", "*").replace("÷", "/").replace("－", "-")
           .replace("－", "-").replace("＊", "*"))
     if "=" in s:                     # "y=9x-16"、"f(x)=x^2" 取等号右边

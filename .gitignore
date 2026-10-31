@@ -22,8 +22,7 @@ data/*.json
 
 # log
 *.log
-*.log.1
-*.log.2
+*.log.*
 
 # ---- 测试 / 工具缓存 ----
 .pytest_cache/
@@ -35,8 +34,7 @@ htmlcov/
 # ---- 交付物与备份（体积大、可再生，不入库）----
 *.zip
 *.pptx
-QuestEdu大纲PPT/
-QuestEdu大纲详细版/
+大纲PPT/
 
 # ---- 系统 ----
 .DS_Store

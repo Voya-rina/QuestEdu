@@ -545,5 +545,48 @@ class TestQuestionInvariant(EngineCase):
                 self.assertTrue(sess.finished, f"{pid} 一路答错也应该能走完")
 
 
+class TestVariantVoiceAnswer(unittest.TestCase):
+    """语音输入的变式回答：SymPy 解析不出来时，模型翻译、SymPy 判定。"""
+
+    def test_translated_answer_counts(self):
+        from app.core import mathcheck
+        sess, _ = Engine.create(problem_id="eigen")
+        Engine.make_variant(sess)
+        sess.mode = "local"                     # 模拟在线会话
+        want = mathcheck.evaluate(sess.variant["expr"])
+        self.assertIsNotNone(want)
+        with mock.patch.object(llm, "online", return_value=True), \
+             mock.patch.object(llm, "chat_json",
+                               return_value={"expr": mathcheck.plain(want)}):
+            res = Engine.judge_variant(sess, "X大于零时是五倍x四次方x小于零时是负5倍x的四次方")
+        self.assertTrue(res["correct"])
+        self.assertEqual(res["student"], mathcheck.latex(want))
+
+    def test_translate_piecewise_to_sign(self):
+        """分段语音回答被翻成 sign(x) 形式，判定仍由 SymPy 做。"""
+        from app.core import mathcheck
+        sess, _ = Engine.create(problem_id="eigen")
+        sess.variant = {"problem": "求 f(x)=|x|^5 的导数",
+                        "expr": "diff(Abs(x)**5, x)",
+                        "answer_plain": "5*x**4*sign(x)"}
+        sess.mode = "local"
+        with mock.patch.object(llm, "online", return_value=True), \
+             mock.patch.object(llm, "chat_json",
+                               return_value={"expr": "5*x**4*sign(x)"}):
+            got = engine_mod._translate_variant_answer(
+                sess, "x大于零时是五倍x四次方，x小于零时是负5倍x的四次方")
+        self.assertIsNotNone(got)
+        self.assertTrue(mathcheck.same(got, mathcheck.evaluate("diff(Abs(x)**5, x)")))
+
+    def test_translation_failure_still_wrong(self):
+        sess, _ = Engine.create(problem_id="eigen")
+        Engine.make_variant(sess)
+        sess.mode = "local"
+        with mock.patch.object(llm, "online", return_value=True), \
+             mock.patch.object(llm, "chat_json", return_value={"expr": ""}):
+            res = Engine.judge_variant(sess, "完全不会")
+        self.assertFalse(res["correct"])
+
+
 if __name__ == "__main__":
     unittest.main()

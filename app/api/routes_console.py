@@ -36,11 +36,23 @@ def _guard(request: Request) -> None:
 
 @router.post("/api/heartbeat")
 def heartbeat(req: HeartbeatReq, request: Request):
-    """学生页心跳：上报当前用户、会话与进度（在线设备列表的数据源）。"""
-    console_data.touch(_client_ip(request), req.user,
-                       request.headers.get("user-agent", ""), req.sid,
-                       req.cur, req.total)
-    return {"ok": True}
+    """学生页心跳：上报当前用户、会话与进度（在线设备列表的数据源）。
+
+    顺带把该设备的「生效方案」带回去：控制台改了权限或换了运行方案，
+    学生端最多 25 秒就能感知并自刷新，不用重新扫码。
+    """
+    ip = _client_ip(request)
+    console_data.touch(ip, req.user, request.headers.get("user-agent", ""),
+                       req.sid, req.cur, req.total)
+    is_ctrl = access.is_controller(_peer(request), request.headers)
+    perm = "server" if is_ctrl else console_data.device_perm(ip)
+    return {
+        "ok": True,
+        "perm": perm,
+        "mode": llm.mode() if perm == "server" else "mock",
+        "ready": bool(llm.available()) if perm == "server" else False,
+        "vision_ready": bool(llm.vision_available()) if perm == "server" else False,
+    }
 
 
 @router.get("/api/console/overview")

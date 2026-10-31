@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from app.config import APP_NAME, VERSION, lan_ip
-from app.core import llm
+from app.core import access, console_data, llm
 from app.core.store import store
 from app.data.problems import PROBLEMS
 
@@ -39,11 +39,24 @@ def problems_brief() -> list[dict]:
 
 @router.get("/api/info")
 def info(request: Request):
+    # 界面按「这台设备实际能用什么」渲染：MOCK 权限的设备一律看到离线题库——
+    # 就算服务端此刻跑着本地模型，自定义题和拍照也不给它出现
+    xff = request.headers.get("x-forwarded-for", "")
+    peer = access.normalize_peer(xff.split(",")[0].strip() if xff
+                                 else (request.client.host if request.client else ""))
+    is_ctrl = access.is_controller(peer, request.headers)
+    llm_desc = llm.describe(full=False)
+    if not is_ctrl and console_data.device_perm(peer) == "mock":
+        llm_desc = {
+            "mode": "mock", "ready": False, "vision_ready": False,
+            "vision_hint": "本设备当前是离线题库权限（MOCK）",
+            "local_timeout": llm_desc.get("local_timeout", 900),
+        }
     return {
         "app": APP_NAME,
         "version": VERSION,
         # 用户端可见的最小集：配置细节（Key 提示、env 路径、端点地址）不下发
-        "llm": llm.describe(full=False),
+        "llm": llm_desc,
         "demo_problem": PROBLEMS[0]["latex"],
         "problems": problems_brief(),
         "lan_url": f"http://{lan_ip()}:{_port(request)}",
