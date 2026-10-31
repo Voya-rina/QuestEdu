@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from app.api.schemas import AnswerReq, AssessReq, CreateSessionReq
-from app.core import access
+from app.core import access, console_data
 from app.core.engine import Engine
 from app.core.store import session_lock, store
 
@@ -20,10 +20,25 @@ def _is_controller(request: Request) -> bool:
     return access.is_controller(peer, request.headers)
 
 
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return access.normalize_peer(xff.split(",")[0].strip())
+    return access.normalize_peer(request.client.host if request.client else "")
+
+
 @router.post("")
-def create_session(req: CreateSessionReq):
+def create_session(req: CreateSessionReq, request: Request):
+    # 设备权限：mock 权限的设备只能用离线题库；控制端本机不受限
+    if _is_controller(request):
+        perm = "server"
+    else:
+        perm = console_data.device_perm(_client_ip(request))
     try:
-        sess, payload = Engine.create(req.problem.strip(), req.problem_id, req.user.strip())
+        sess, payload = Engine.create(
+            req.problem.strip(), req.problem_id, req.user.strip(),
+            mode="mock" if perm == "mock" else "",
+        )
     except Exception as e:
         raise HTTPException(400, f"拆题失败：{str(e)[:300]}")
     store.save(sess)

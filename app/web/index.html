@@ -38,6 +38,13 @@ header{
 }
 .brand{font-weight:600;font-size:16px;letter-spacing:.5px}
 .brand em{font-style:normal;font-weight:400;font-size:11px;color:var(--muted);margin-left:6px;letter-spacing:.5px}
+.user-chip{
+  flex:0 0 auto;display:inline-flex;align-items:center;max-width:30vw;
+  border:1px solid var(--line);background:#fff;border-radius:20px;
+  padding:5px 11px;font-family:inherit;font-size:12px;color:#5C626B;
+  cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.user-chip:active{background:#F2F3F6}
 .dots{display:flex;gap:5px;align-items:center;margin-left:auto}
 .gear{
   flex:0 0 auto;width:30px;height:30px;margin-left:9px;padding:0;border-radius:var(--r-sm);
@@ -71,6 +78,11 @@ main{flex:1 1 auto;overflow-y:auto;padding:0 16px 16px;-webkit-overflow-scrollin
 .home h1 span{color:var(--brand)}
 .home p.sub{color:var(--muted);font-size:13px;margin:0 0 22px}
 .qlist{display:flex;flex-direction:column;gap:10px}
+.sec-div{
+  display:flex;align-items:center;gap:12px;margin:22px 0 14px;color:var(--muted);
+  font-size:12px;letter-spacing:2px;
+}
+.sec-div:before,.sec-div:after{content:"";flex:1;height:1px;background:var(--line)}
 .qitem{
   display:block;width:100%;text-align:left;background:var(--card);
   border:1px solid var(--line);border-radius:var(--r-lg);padding:14px 16px;
@@ -348,6 +360,11 @@ input[type=range]::-webkit-slider-thumb{
   flex:0 0 auto;white-space:nowrap;font-family:inherit;font-size:12px;
   color:var(--brand);background:none;border:0;padding:0;cursor:pointer;
 }
+.perm-btn{
+  padding:3px 10px;border-radius:12px;font-size:11.5px;border:1px solid var(--line);
+  background:#F2F3F6;color:#5C626B;
+}
+.perm-btn.on{background:var(--green-soft);border-color:transparent;color:#0E6B4E;font-weight:600}
 /* 开关 */
 .sw{position:relative;display:inline-flex;width:46px;height:27px;flex:0 0 auto}
 .sw input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
@@ -530,11 +547,14 @@ input[type=range]::-webkit-slider-thumb{
 .group{margin-bottom:10px}
 .g-head{
   width:100%;display:flex;align-items:center;gap:8px;
-  padding:6px 2px 9px;border:none;background:none;cursor:pointer;
-  font-family:inherit;font-size:12.5px;letter-spacing:.4px;color:var(--muted);text-align:left;
+  padding:8px 13px;border:0;border-radius:var(--r-md);
+  background:#E9ECF2;cursor:pointer;
+  font-family:inherit;font-size:12.5px;font-weight:600;letter-spacing:.4px;
+  color:#565D67;text-align:left;
 }
-.g-head .g-count{font-size:11px;background:#EDEFF3;border-radius:20px;padding:1px 7px;color:#7C838D}
-.g-head .g-arrow{margin-left:auto;font-style:normal;transition:transform .18s}
+.g-head:active{background:#E0E4EB}
+.g-head .g-count{font-size:11px;font-weight:400;background:#fff;border-radius:20px;padding:1px 7px;color:#7C838D}
+.g-head .g-arrow{margin-left:auto;font-style:normal;font-weight:400;color:var(--muted);transition:transform .18s}
 .group.closed .g-arrow{transform:rotate(-90deg)}
 .g-body{display:flex;flex-direction:column;gap:10px}
 .group.closed .g-body{display:none}
@@ -582,6 +602,7 @@ input[type=range]::-webkit-slider-thumb{
       </svg>
     </button>
     <div class="brand">学问<em>QUESTEDU</em></div>
+    <button class="user-chip" id="user-chip" style="display:none"></button>
     <div class="dots" id="dots"><span class="count" id="count"></span></div>
     <button class="gear" id="qr-btn" aria-label="扫码在手机上打开">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -616,9 +637,9 @@ input[type=range]::-webkit-slider-thumb{
         <div class="c-note" id="c-note"></div>
         <input type="file" id="c-album-file" accept="image/*" hidden>
       </div>
+      <div class="sec-div"><span>例题</span></div>
       <div class="qlist" id="qlist"></div>
       <div class="hist-entry">
-        <button class="linkbtn" id="user-switch" style="display:block;width:auto;margin:0 auto 8px"></button>
         <button class="btn outline" id="history-btn">我的学习记录</button>
       </div>
     </section>
@@ -763,6 +784,11 @@ input[type=range]::-webkit-slider-thumb{
         <div class="acc-h"><b>IPv6 直连</b><span class="tag">不用第三方</span></div>
         <div id="v6-body"></div>
         <p class="sub hidable" id="v6-hint"></p>
+      </div>
+
+      <div class="acc-card" id="perm-card">
+        <div class="acc-h"><b>设备权限</b><span class="tag">近 24h</span></div>
+        <div id="perm-list"></div>
       </div>
 
       <div class="acc-card">
@@ -1047,9 +1073,11 @@ function askLeave(){
    左边的数字计数照旧，负责"推进到第几步"。 */
 const STAGE_SEQ = ['回顾', '启发', '纠偏', '收束'];
 let CUR_STAGE = -1;
+let LAST_CUR = 0, LAST_TOTAL = 0;   // 心跳上报用：当前进度
 
 function setProgress(cur, total, stage){
   TOTAL = total || TOTAL;
+  LAST_CUR = cur; LAST_TOTAL = TOTAL;
   const idx = STAGE_SEQ.indexOf(stage || '');
   if(idx >= 0) CUR_STAGE = idx;
   // 走完了（cur === total）就把四格全点亮：3 节点的计划映射不到"收束"，
@@ -1134,8 +1162,9 @@ function initUser(){
 }
 
 function paintUserChip(){
-  $('#user-switch').textContent = USER ? ('👤 ' + USER + ' · 点此切换') : '';
-  $('#user-switch').style.display = USER ? 'block' : 'none';
+  const t = USER ? ('👤 ' + USER) : '';
+  $('#user-chip').textContent = t;
+  $('#user-chip').style.display = USER ? '' : 'none';
 }
 
 function commitUser(){
@@ -1145,7 +1174,21 @@ function commitUser(){
   try{ localStorage.setItem(LS_USER, JSON.stringify(USER)); }catch(e){}
   paintUserChip();
   closeSheet('#sheet-user');
-  // 换了人，首页题单不变，但历史列表是按人查的，无需额外刷新
+  heartbeat();    // 换人立即上报，控制台的设备列表马上跟上
+}
+
+/* ---------- 心跳：控制台"在线设备与用户"的数据源 ---------- */
+function heartbeat(){
+  try{
+    fetch('/api/heartbeat', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user: USER, sid: SID || '', cur: LAST_CUR, total: LAST_TOTAL}),
+    }).catch(() => {});
+  }catch(e){}
+}
+function startHeartbeat(){
+  heartbeat();
+  setInterval(heartbeat, 25000);
 }
 
 /* ---------- 等待层的小贴士：一次只出一条，隔几秒换下一条 ---------- */
@@ -1335,12 +1378,13 @@ async function boot(){
   $('#user-input').addEventListener('keydown', e => {
     if(e.key === 'Enter' && !e.isComposing && $('#user-input').value.trim()) commitUser();
   });
-  $('#user-switch').onclick = () => {
+  const openUserSheet = () => {
     $('#user-input').value = USER;
     $('#user-ok').disabled = !USER;
     openSheet('#sheet-user');
     setTimeout(() => $('#user-input').focus(), 250);
   };
+  $('#user-chip').onclick = openUserSheet;
   initUser();
   $('#back').onclick = async () => {
     if(PHASE === 'chat' || PHASE === 'assess' || PHASE === 'variant'){
@@ -1387,10 +1431,14 @@ async function boot(){
   initQRCard();
   initDemoLock();
   initLLM();
-  // 一对多的权限边界：设置是控制端（跑服务的电脑）专属。
-  // 观众设备上直接把齿轮藏掉——服务端同样拦着，这里只是不给他们看见入口
+  // 一对多的权限边界：设置/入口管理是控制端（跑服务的电脑）专属。
+  // 用户端连齿轮和扫码按钮都不渲染——服务端同样拦着，这里只是不给看见
   api('/api/llm').then(s => {
-    if(s && s.controller === false) $('#gear').style.display = 'none';
+    if(s && s.controller === false){
+      $('#gear').style.display = 'none';
+      $('#qr-btn').style.display = 'none';
+    }
+    startHeartbeat();
   }).catch(() => {});
   await refreshHome();
 }
@@ -1817,6 +1865,30 @@ async function loadAccess(){
     const u = ($('#host-url').value || '').trim();
     if(u) window.open(u, '_blank', 'noopener');
   };
+
+  // 设备权限（控制端专属接口，403 就整卡隐藏）
+  try{
+    const dv = await api('/api/console/devices');
+    $('#perm-card').style.display = '';
+    $('#perm-list').innerHTML = (dv.devices || []).map(d => `
+      <div class="lan-item">
+        <span>${d.kind === '手机' ? '📱' : '💻'} ${esc(d.user || '未署名')}
+          <small style="color:var(--muted);font-family:var(--mono)">${esc(d.ip)}</small></span>
+        <button class="cp perm-btn ${d.perm === 'server' ? 'on' : ''}" data-ip="${esc(d.ip)}"
+                data-perm="${d.perm === 'server' ? 'server' : 'mock'}">${d.perm === 'server' ? '服务端' : 'MOCK'}</button>
+      </div>`).join('') || '<div class="lan-item"><span>暂无设备</span></div>';
+    $('#perm-list').querySelectorAll('.perm-btn').forEach(b => {
+      b.onclick = async () => {
+        const next = b.dataset.perm === 'server' ? 'mock' : 'server';
+        try{
+          await api('/api/console/device-perm', {ip: b.dataset.ip, perm: next});
+          await loadAccess();
+        }catch(e){ toast(e.message || '操作失败', 'err'); }
+      };
+    });
+  }catch(e){
+    $('#perm-card').style.display = 'none';
+  }
 
   // 访问码
   $('#acc-code').textContent = (a.gate && a.gate.code) || '····';

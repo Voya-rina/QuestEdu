@@ -39,8 +39,13 @@ def session_lock(sid: str) -> threading.Lock:
 class MemoryStore:
     def __init__(self) -> None:
         self._data: dict[str, Session] = {}
+        self._deleted: set[str] = set()
 
     def save(self, sess: Session) -> None:
+        # 删除后在途请求晚到落盘会把会话整体写回——墓碑拦掉，删除才算删干净
+        if sess.id in self._deleted:
+            self._deleted.discard(sess.id)
+            return
         self._data[sess.id] = sess
 
     def get(self, sid: str) -> Session:
@@ -61,6 +66,19 @@ class MemoryStore:
     def clear(self) -> None:
         self._data.clear()
 
+    def delete(self, sid: str) -> None:
+        self._data.pop(sid, None)
+        self._deleted.add(sid)
+
+    def ids(self) -> list[tuple[str, str, object]]:
+        """(id, status, created_at) 轻量列表，批量清理用。"""
+        out = []
+        for s in self._data.values():
+            status = ("assessed" if s.self_score is not None
+                      else "finished" if s.finished else "running")
+            out.append((s.id, status, s.created_at))
+        return out
+
 
 class SqlStore:
     """写穿缓存：内存里留着活对象给引擎改，每次改完整体落盘。"""
@@ -78,11 +96,15 @@ class SqlStore:
         self._SelfRow = SelfAssessmentRow
         self._MasteryRow = MasteryRow
         self._cache: dict[str, Session] = {}
+        self._deleted: set[str] = set()
         db.init_db()
 
     # ---------------------------------------------------------- 写
 
     def save(self, sess: Session) -> None:
+        if sess.id in self._deleted:
+            self._deleted.discard(sess.id)
+            return
         self._cache[sess.id] = sess
         db = self._db
         with db.SessionLocal() as s:
@@ -252,6 +274,24 @@ class SqlStore:
     def clear(self) -> None:
         """只清缓存，不动数据库——用来模拟"服务重启"。"""
         self._cache.clear()
+
+    def delete(self, sid: str) -> None:
+        self._cache.pop(sid, None)
+        self._deleted.add(sid)
+        with self._db.SessionLocal() as s:
+            for table in (self._MessageRow, self._StepRow,
+                          self._SelfRow, self._MasteryRow):
+                s.execute(delete(table).where(table.session_id == sid))
+            s.execute(delete(self._SessionRow).where(self._SessionRow.id == sid))
+            s.commit()
+
+    def ids(self) -> list[tuple[str, str, object]]:
+        with self._db.SessionLocal() as s:
+            rows = s.execute(
+                select(self._SessionRow.id, self._SessionRow.status,
+                       self._SessionRow.created_at)
+            ).all()
+        return [(r[0], r[1], r[2]) for r in rows]
 
 
 def _parse_dt(value) -> datetime:

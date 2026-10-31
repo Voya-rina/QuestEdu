@@ -11,12 +11,13 @@ from __future__ import annotations
 import logging
 import sys
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import (
     routes_access,
+    routes_console,
     routes_llm,
     routes_meta,
     routes_ocr,
@@ -25,7 +26,8 @@ from app.api import (
     routes_ws,
 )
 from app.config import APP_NAME, DATA_DIR, VERSION, WEB_DIR
-from app.core.access import AccessGate
+from app.core.access import AccessGate, is_controller
+from app.core.console_data import ring_log
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -45,6 +47,8 @@ def _setup_logging() -> None:
     cons = logging.StreamHandler()
     cons.setFormatter(fmt)
     root.addHandler(cons)
+    ring_log.setFormatter(fmt)
+    root.addHandler(ring_log)
     try:
         from logging.handlers import RotatingFileHandler
 
@@ -71,9 +75,32 @@ def create_app() -> FastAPI:
     # 前端静态资源（含本地 vendor/KaTeX，不依赖任何 CDN）
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
+    # ---------- 页面路由：按角色分流 ----------
+    # `/` 是角色分流入口：控制端（跑服务的电脑）打开 → 控制台 Dashboard；
+    # 扫码进来的用户端打开 → 学生页。角色判定永远在服务端（is_controller）。
     @app.get("/", include_in_schema=False)
-    def index():
-        return FileResponse(WEB_DIR / "index.html", media_type="text/html; charset=utf-8")
+    def index(request: Request):
+        peer = request.client.host if request.client else ""
+        if is_controller(peer, request.headers):
+            return FileResponse(WEB_DIR / "console.html",
+                                media_type="text/html; charset=utf-8")
+        return FileResponse(WEB_DIR / "index.html",
+                            media_type="text/html; charset=utf-8")
+
+    # 学生页固定地址：控制端也能打开预览学生视图
+    @app.get("/student", include_in_schema=False)
+    def student():
+        return FileResponse(WEB_DIR / "index.html",
+                            media_type="text/html; charset=utf-8")
+
+    # 控制台固定地址：非控制端访问一律弹回学生页（防 URL 猜测）
+    @app.get("/console", include_in_schema=False)
+    def console_page(request: Request):
+        peer = request.client.host if request.client else ""
+        if not is_controller(peer, request.headers):
+            return RedirectResponse("/", status_code=302)
+        return FileResponse(WEB_DIR / "console.html",
+                            media_type="text/html; charset=utf-8")
 
     # PWA 的两个文件必须挂在根路径：manifest 的 scope 与 service worker 的
     # 控制范围都由它们自己的 URL 决定，放在 /static/ 下就只能控制 /static/
@@ -97,6 +124,7 @@ def create_app() -> FastAPI:
     app.include_router(routes_ws.router)
     app.include_router(routes_llm.router)
     app.include_router(routes_access.router)
+    app.include_router(routes_console.router)
 
     # 公网入口（隧道 / 托管）要过访问码；局域网直连不受影响。
     # 挂在 ASGI 层是因为 HTTP 中间件管不到 /ws/chat。

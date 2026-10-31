@@ -180,5 +180,45 @@ class TestUnparseableExpect(unittest.TestCase):
         self.assertEqual(verdict_offline("不会", node)[0], "wrong")
 
 
+class TestExpressionAnswers(unittest.TestCase):
+    """期望值本身是表达式（导函数、切线方程）时的判定。
+
+    实测踩过：期望 "y'=3x^2-3" 只能整串关键词匹配，学生打 "3x^2-3"
+    反而判错。现在走整体解析 + 符号比对。
+    """
+
+    def test_derivative_expression(self):
+        node = {"numeric": "3*x**2 - 3", "answers": ["y'=3x^2-3"]}
+        for t in ("3x^2-3", "3*x**2-3", "y'=3x^2-3", "y=3x^2-3"):
+            self.assertEqual(verdict_offline(t, node)[0], "correct", t)
+        self.assertEqual(verdict_offline("3x^2-2", node)[0], "wrong")
+        self.assertEqual(verdict_offline("9", node)[0], "wrong",
+                         "抽数字比对会把 9 当答案——表达式必须整体比")
+
+    def test_tangent_line_expression(self):
+        node = {"numeric": "9*x - 16", "answers": []}
+        self.assertEqual(verdict_offline("y=9x-16", node)[0], "correct")
+        self.assertEqual(verdict_offline("9x-16", node)[0], "correct")
+        self.assertEqual(verdict_offline("y=9x-15", node)[0], "wrong")
+
+    def test_conflicting_numeric_is_dropped_at_build(self):
+        """答 y=9x-16 配 式=1/2 的垃圾（实测）：洗节点时必须丢掉式，
+        否则数值比对劫持判定，学生答对也按 1/2 判错。"""
+        from app.core.engine import _build_nodes
+        nodes = _build_nodes(
+            [{"问": "切线方程是什么？", "答": "y=9x-16", "式": "1/2"}],
+            {"知识点": ["切线"]}, 3)
+        self.assertEqual(nodes[0]["numeric"], "", "式与答矛盾，应丢弃式")
+        self.assertEqual(nodes[0]["answers"], ["y=9x-16"])
+
+    def test_multi_value_answer_reversed_order_accepted(self):
+        """特征值"1 和 3"：学生打 "3 和 1" 也该算对。"""
+        from app.core.engine import _build_nodes
+        nodes = _build_nodes(
+            [{"问": "特征值 λ 是多少？", "答": "1 和 3", "式": ""}],
+            {"知识点": ["特征值"]}, 3)
+        self.assertIn("3 和 1", nodes[0]["answers"])
+
+
 if __name__ == "__main__":
     unittest.main()

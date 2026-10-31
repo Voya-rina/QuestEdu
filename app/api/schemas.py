@@ -20,6 +20,14 @@ class AssessReq(BaseModel):
     score: int = Field(ge=0, le=5)
 
 
+class HeartbeatReq(BaseModel):
+    """学生页心跳：在线设备列表的数据源。字段全可空——能带多少带多少。"""
+    user: str = Field(default="", max_length=64)
+    sid: str = Field(default="", max_length=32)
+    cur: int | None = None
+    total: int | None = None
+
+
 class LLMConfigReq(BaseModel):
     """模型配置。
 
@@ -38,3 +46,20 @@ class LLMConfigReq(BaseModel):
     local_base_url: str = ""
     local_model: str = ""
     local_vision_model: str | None = None
+
+
+class ModeReq(BaseModel):
+    """控制台快捷切换运行方案（只动 INFERENCE_MODE，其余配置原样保留）。"""
+    mode: str = Field(pattern="^(mock|cloud|local|hybrid)$")
+
+
+class DevicePermReq(BaseModel):
+    """设备权限：mock=只能用离线题库；server=走服务端当前运行方案。"""
+    ip: str = Field(min_length=1, max_length=64)
+    perm: str = Field(pattern="^(mock|server)$")
+
+
+class PurgeReq(BaseModel):
+    """会话批量清理：all=全部；finished=非进行中；older=hours 小时前。"""
+    scope: str = Field(pattern="^(all|finished|older)$")
+    hours: float | None = Field(default=None, gt=0, le=24 * 30)

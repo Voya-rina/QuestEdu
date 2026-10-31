@@ -57,6 +57,17 @@ def hint_for(node: dict, level: int) -> str:
     return hs[min(level, len(hs) - 1)]
 
 
+def _expr_answer_ok(text: str, want) -> bool:
+    """答案本身是表达式（导函数、切线方程这类）时的比对。
+
+    以前这种节点只能靠关键词整串匹配——期望值是 "y'=3x^2-3"，学生老老实实
+    打 "3x^2-3" 反而判错。现在复用变式题的机制：学生输入整体解析成 SymPy
+    表达式（容忍 4x^3、y=9x-16、f(x)=x^2），再符号比对。
+    """
+    got = mathcheck.parse_student_expr(text)
+    return got is not None and mathcheck.same(got, want)
+
+
 def verdict_offline(text: str, node: dict):
     """离线判定。返回 (verdict, got, reply_override)。
 
@@ -67,13 +78,18 @@ def verdict_offline(text: str, node: dict):
     num = node.get("numeric")
     if num:
         want = mathcheck.parse_expr(num)
-        got = mathcheck.number_in(text)
         # want 解析不出来（模型给的是"计算 y'=3x^2-3"这种带说明的串）就当没有：
         # 不能因为一条不可求值的期望值，把答对的学生判成错。
-        # want 是表达式（含符号）时同样不比数字——"y=9x-16" 抽出 16 去比必误判
-        if got is not None and want is not None and want.is_number:
-            return ("correct" if mathcheck.same(got, want) else "wrong"), got, ""
-        # 没抽到数字，可能是"二阶""x²"这类表述，继续往下走
+        if want is not None:
+            if want.is_number:
+                got = mathcheck.number_in(text)
+                if got is not None:
+                    return ("correct" if mathcheck.same(got, want) else "wrong"), got, ""
+            else:
+                # 期望值是表达式（3*x**2-3、9*x-16）：整体解析学生输入做符号比对
+                if _expr_answer_ok(text, want):
+                    return "correct", None, ""
+        # 没抽到数字/解析不出，可能是"二阶""x²"这类表述，继续往下走
 
     if hits(text, node.get("answers")):
         return "correct", None, ""
@@ -152,8 +168,8 @@ def verdict_cloud(text: str, node: dict, history: list):
 
     # 数值核对是最后一道闸，模型说了不算：
     # 优先用模型抠出的值，抠不出来再从学生原话里抽一次（小模型经常漏抽）
-    # 只对"期望值本身是纯数值"的节点生效——期望是方程/表达式（y=9x-16）时，
-    # 从学生原话里抽数字去和表达式比必然误判，交给关键词和语义层
+    # 纯数值期望 → 抽数字比对；表达式期望（导函数、切线方程）→ 整体解析比对。
+    # 表达式若只靠语义判定，模型判"correct"无从校验，判错也发现不了
     if node.get("numeric"):
         want = mathcheck.parse_expr(node["numeric"])
         if want is not None and want.is_number:
@@ -166,5 +182,8 @@ def verdict_cloud(text: str, node: dict, history: list):
             if got is not None:
                 # 符号引擎说话，模型让位——护城河就落在这几行
                 verdict = "correct" if mathcheck.same(got, want) else "wrong"
+        elif want is not None and getattr(want, "free_symbols", set()):
+            if _expr_answer_ok(text, want):
+                verdict = "correct"
 
     return verdict, data.get("reply", ""), node.get("stage")

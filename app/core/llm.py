@@ -17,6 +17,8 @@ import os
 import re
 import threading
 import time
+from collections import deque
+from datetime import datetime
 
 from app.config import ENV_PATH
 
@@ -26,6 +28,53 @@ _cfg: dict = {}
 _last_usage: dict = {}
 _last_raw: str = ""
 _last_route: dict = {}       # 最近一次成功请求走的端点（name + model），OCR 标签用
+
+# ---------------------------------------------------------------- 调用日志
+# 控制台 Dashboard 的"LLM 调用流"数据源：每次成功/失败都记一条（环形 200 条），
+# 记输入/输出规模、耗时、错误与回复摘要——答辩排查"模型到底回了什么"全靠它。
+_call_seq = 0
+_call_log: deque = deque(maxlen=200)
+_call_lock = threading.Lock()
+
+
+def _log_call(route: dict, ok: bool, ms: int, n_in: int, n_out: int,
+              err: str = "", reply: str = "") -> None:
+    global _call_seq
+    with _call_lock:
+        _call_seq += 1
+        _call_log.append({
+            "seq": _call_seq,
+            "ts": datetime.now().strftime("%H:%M:%S"),
+            "route": route["name"], "model": route["model"],
+            "ok": ok, "ms": ms, "in": n_in, "out": n_out,
+            "err": (err or "")[:300],
+            "reply": (reply or "")[:800],
+        })
+
+
+def call_log(after: int = 0) -> list[dict]:
+    """after 之后的调用记录（增量拉取）。"""
+    with _call_lock:
+        return [dict(e) for e in _call_log if e["seq"] > after]
+
+
+def call_seq() -> int:
+    with _call_lock:
+        return _call_seq
+
+
+def _prompt_chars(messages: list) -> int:
+    """这次请求的输入规模（文本部分字符数；图片部分不计）。"""
+    n = 0
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str):
+            n += len(c)
+        elif isinstance(c, list):
+            for p in c:
+                if isinstance(p, dict) and isinstance(p.get("text"), str):
+                    n += len(p["text"])
+    return n
 
 # 本地推理端点（LM Studio / llama-server / Ollama）内部是串行的：并发打过去的
 # 请求只会在它的队列里互相拖慢（日志里成串的 Client disconnected 就是这么来的）。
@@ -392,40 +441,46 @@ def _send_http(route: dict, messages: list, temperature: float,
     # connect 单独设小：地址填错要立刻报错，不能陪着 read timeout 一起等十几分钟
     limit = httpx.Timeout(connect=8, read=route.get("timeout") or 120, write=60, pool=8)
     t0 = time.time()
+    prompt_chars = _prompt_chars(messages)
     try:
-        with httpx.Client(timeout=limit) as client:
-            r = client.post(f"{route['base_url']}/chat/completions", headers=headers, json=payload)
-    except httpx.TimeoutException:
-        raise LLMTimeout(
-            f"等了 {int(time.time() - t0)} 秒还没回话"
-            + ("（本地模型首次加载权重可能要一两分钟）" if route["name"] == "local" else "")
-        )
-    except httpx.HTTPError as e:
-        raise LLMError(f"连不上 {route['base_url']}（{type(e).__name__}: {e}）")
-
-    if r.status_code >= 400:
-        detail = r.text[:300]
         try:
-            j = r.json()
-            msg = (j.get("error") or {}).get("message") or j.get("message")
-            if msg:
-                detail = msg
-        except Exception:
-            pass
-        raise LLMError(f"HTTP {r.status_code} · {detail}")
+            with httpx.Client(timeout=limit) as client:
+                r = client.post(f"{route['base_url']}/chat/completions", headers=headers, json=payload)
+        except httpx.TimeoutException:
+            raise LLMTimeout(
+                f"等了 {int(time.time() - t0)} 秒还没回话"
+                + ("（本地模型首次加载权重可能要一两分钟）" if route["name"] == "local" else "")
+            )
+        except httpx.HTTPError as e:
+            raise LLMError(f"连不上 {route['base_url']}（{type(e).__name__}: {e}）")
 
-    try:
-        body = r.json()
-        choice = body["choices"][0]
-    except Exception:
-        raise LLMError(f"返回格式不认识：{r.text[:200]}")
-    _last_usage.clear()
-    _last_usage.update(body.get("usage") or {})
-    globals()["_last_route"] = {"name": route["name"], "model": route["model"]}
-    out = content_of(choice)
-    log.info("LLM %s · %s · %dms · 回复 %d 字",
-             route["name"], route["model"], int((time.time() - t0) * 1000), len(out))
-    return out
+        if r.status_code >= 400:
+            detail = r.text[:300]
+            try:
+                j = r.json()
+                msg = (j.get("error") or {}).get("message") or j.get("message")
+                if msg:
+                    detail = msg
+            except Exception:
+                pass
+            raise LLMError(f"HTTP {r.status_code} · {detail}")
+
+        try:
+            body = r.json()
+            choice = body["choices"][0]
+        except Exception:
+            raise LLMError(f"返回格式不认识：{r.text[:200]}")
+        _last_usage.clear()
+        _last_usage.update(body.get("usage") or {})
+        globals()["_last_route"] = {"name": route["name"], "model": route["model"]}
+        out = content_of(choice)
+        log.info("LLM %s · %s · %dms · 回复 %d 字",
+                 route["name"], route["model"], int((time.time() - t0) * 1000), len(out))
+        _log_call(route, True, int((time.time() - t0) * 1000), prompt_chars, len(out), reply=out)
+        return out
+    except LLMError as e:
+        _log_call(route, False, int((time.time() - t0) * 1000), prompt_chars, 0, err=str(e))
+        raise
 
 
 def content_of(choice: dict) -> str:

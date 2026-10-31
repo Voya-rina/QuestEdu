@@ -133,25 +133,44 @@ def demo_plan(prob: dict) -> dict:
 PLAN_SYSTEM = """你是数学助教，把一道题拆成学生逐步作答的小问题。只输出 JSON，不要解释：
 {"题型":"","知识点":[""],"难度":"","节点":[{"问":"","答":"","式":""}]}
 
-每个节点三条规则：
+每个节点的规则：
 1. 「问」：一小步的具体**疑问句**——句子里要有疑问词（多少 / 几 / 什么 / 哪一项），
    以？结尾，答案是一个数、一个简短结果或一个方法名。
    - 从"把具体值代进去看看"这类最基础的一步开始，先观察、再定方法、最后算结果
+   - **一步只问一件事**：禁止一句话塞两个问题（"A 是什么，B 是什么？"）。
+     需要两个信息就拆成两步；或者由题面固定其一，只问另一个
+     （错误示例："选 u 是什么，选 dv 是什么？"；
+      正确做法："令 u=x，那么 v=∫e^x dx 等于多少？"）
+   - **不许把答案喂到嘴边**：问句里可以铺垫背景，但不能直接给出决定性的
+     中间结果再问"剩下什么"（错误示例："展开到二阶是 1+x+x^2/2，那么分子
+     约掉后剩下什么？"——展开式就是答案的一半）
+   - **节点之间不许重复**：每个节点问不同的东西、有不同的答案；
+     "特征值是几"和"两个特征值分别是多少"是同一个问题
+   - 问句里的记号必须是学生**能打出来**的：别让学生输入 λ、∫ 这类符号——
+     问"特征值"就问"λ 等于几"并让它答数字，行列式展开这类带 λ 的中间式
+     不要当答案（「式」留空、靠下一问收数字）
    - 禁止指令式陈述："写出…""计算…""解出…"——改成"…是多少？"
    - 禁止让学生默写完整公式（如"写出 e^x 的泰勒展开式"）——改问其中的具体量：第几阶、系数是多少、剩哪一项
    - 禁止流程反问："你想…吗""准备好了吗""然后呢""那你觉得呢"
-2. 「答」：期望要点，给学生看的简短说法。
+2. 「答」：期望要点，要能被学生**一口气说出来**——一个名词、一个数或一个式子；
+   禁止 "A=…，B=…" 这种逗号并列的形式（没法作答，也没法判定）。
 3. 「式」：「答」的 SymPy 形式：纯 ASCII（1/2、-16、sqrt(2)/2、exp(2)、3*x^2-3）；
    答案不是数值（方法名、名词）就写 ""。
 
 节点数不超过 __BUDGET__ 个。
 
-示例（lim(x→0) (e^x-1-x)/x^2）：
+示例一（lim(x→0) (e^x-1-x)/x^2）：
 {"题型":"极限计算","知识点":["泰勒展开"],"难度":"中等","节点":[
 {"问":"先别急着算。把 x=0 代进分子和分母，它们各自变成几？","答":"分子分母都是 0","式":"0"},
 {"问":"这种分子分母同时为 0 的极限形式叫什么？","答":"0/0 型未定式","式":""},
 {"问":"分母是 x^2，分子用泰勒展开要展到第几阶？","答":"2 阶","式":"2"},
-{"问":"代回分子化简后约掉 x^2，极限等于多少？","答":"1/2","式":"1/2"}]}"""
+{"问":"代回分子化简后约掉 x^2，极限等于多少？","答":"1/2","式":"1/2"}]}
+
+示例二（∫[0,1] x·e^x dx）：
+{"题型":"定积分计算","知识点":["分部积分法"],"难度":"中等","节点":[
+{"问":"被积函数是两种不同类型函数的乘积，这种积分用哪个方法？","答":"分部积分","式":""},
+{"问":"令 u=x，那么 v=∫e^x dx 等于多少？","答":"e^x","式":"exp(x)"},
+{"问":"代回分部积分公式，原函数是 x*e^x-e^x。代入上下限，结果是几？","答":"1","式":"1"}]}"""
 
 _STAGES = ["回顾", "启发", "纠偏", "收束"]
 
@@ -248,6 +267,21 @@ def _build_nodes(raw_nodes: list, meta: dict, budget: int) -> list[dict]:
         numeric = mathcheck.clean_numeric(nd.get("式") or nd.get("sympy检查"))
         if not numeric:
             numeric = mathcheck.clean_numeric(ans)     # 模型常把值写在「答」里
+        # 「式」与「答」互相矛盾时丢弃「式」：实测模型给过 答"y=9x-16" 配
+        # 式"1/2" 的垃圾——不丢的话数值比对会劫持判定，学生答对也判错。
+        # 宁可少一层判定，不可误判
+        if numeric:
+            ans_expr = mathcheck.parse_student_expr(ans) if ans else None
+            num_val = mathcheck.parse_expr(numeric)
+            if (ans_expr is not None and getattr(ans_expr, "free_symbols", set())
+                    and num_val is not None and num_val.is_number
+                    and not mathcheck.same(ans_expr, num_val)):
+                numeric = ""
+        # "1 和 3" 这类多值答案：把倒序说法也加进可接受答案（学生打 "3 和 1"）
+        answers = [ans] if ans else []
+        m2 = re.fullmatch(r"(-?\d+)\s*和\s*(-?\d+)", (ans or "").strip())
+        if m2 and m2.group(1) != m2.group(2):
+            answers.append(f"{m2.group(2)} 和 {m2.group(1)}")
         nodes.append({
             "n": i,
             "stage": _STAGES[min(i - 1, len(_STAGES) - 1)],
@@ -255,7 +289,7 @@ def _build_nodes(raw_nodes: list, meta: dict, budget: int) -> list[dict]:
             "question": ensure_question(_to_question(clean_ask(ask))),
             "expect": ans,
             "numeric": numeric,
-            "answers": [ans] if ans else [],
+            "answers": answers,
             "partial_kw": [],
             "correct_reply": "",
             "partial_hint": "",
@@ -341,8 +375,9 @@ class Engine:
 
     @staticmethod
     def create(problem: str = "", problem_id: str | None = None,
-               user: str = "") -> tuple[Session, dict]:
-        use_demo = not llm.online()
+               user: str = "", mode: str = "") -> tuple[Session, dict]:
+        forced_mock = mode == "mock"
+        use_demo = forced_mock or not llm.online()
         plan_fallback = False
         if use_demo:
             prob = get_problem(problem_id)
@@ -369,7 +404,7 @@ class Engine:
         sess = Session(
             id=uuid.uuid4().hex[:10],
             problem=problem,
-            mode=llm.mode(),
+            mode="mock" if forced_mock else llm.mode(),
             plan=plan,
             problem_id=pid,
             user=(user or "")[:64],
@@ -381,7 +416,7 @@ class Engine:
                  "（拆题失败，内置脚本兜底）" if plan_fallback else "")
         return sess, {
             "session_id": sess.id,
-            "mode": llm.mode(),
+            "mode": sess.mode,
             "offline_demo": use_demo,
             "plan_fallback": plan_fallback,
             "problem_id": pid,
@@ -432,7 +467,7 @@ class Engine:
         # 降维进行中：当前回答是在答"前置知识点"那道小题，不是主问题
         prereq = node.get("prerequisite")
         if sess.prereq_active and prereq:
-            if not llm.online():
+            if sess.mode == "mock" or not llm.online():
                 verdict, _, _ = verdict_offline(text, prereq)
             else:
                 try:
@@ -461,7 +496,7 @@ class Engine:
         in_followup = bool(followup and sess.followup_done)
         target = followup if in_followup else node
 
-        if not llm.online():
+        if sess.mode == "mock" or not llm.online():
             verdict, got, reply = verdict_offline(text, target)
         else:
             try:
@@ -630,7 +665,7 @@ class Engine:
         v = prob["variant"]
         problem, expr = v["latex"], v["表达式"]
         ask = v.get("ask") or "直接给出结果"
-        if llm.online():
+        if llm.online() and sess.mode != "mock":
             try:
                 problem, expr = cloud_variant(sess)
             except llm.LLMError:
@@ -647,7 +682,7 @@ class Engine:
             if lv is not None:
                 expr = f"limit({expr}, x, 0)"
                 answer = lv
-        if answer is None and llm.online():
+        if answer is None and llm.online() and sess.mode != "mock":
             # 双保险：模型给的题/表达式求不出值，整体退回内置变式题。
             # 标准答案显示成 "?" 等于告诉学生这产品连自己都算不明白
             v0 = prob["variant"]

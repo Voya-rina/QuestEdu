@@ -25,12 +25,6 @@ def _ctrl_guard(request: Request) -> None:
         raise HTTPException(403, "模型设置只能在运行服务的电脑上修改")
 
 
-def _demo_guard() -> None:
-    """演示模式中，设置相关写操作一律拒绝（前端灰掉不算数，POST 能绕）。"""
-    if access.demo_mode():
-        raise HTTPException(403, "演示模式已开启，设置已锁定；只能在开启演示的设备上解锁")
-
-
 @router.get("")
 def status(request: Request):
     controller = _is_controller(request)
@@ -52,9 +46,10 @@ def save(req: LLMConfigReq, request: Request):
 
     `mode=mock` 就是"离线题库"这个运行方案本身，并不是清除；
     `api_key` 留空表示沿用已保存的 Key，真删要显式传 `clear_key`。
+    演示模式不在这里拦：本接口本来就只有控制端能调，
+    控制台和学生页设置在演示中都要能改（观众设备依然 403）。
     """
     _ctrl_guard(request)
-    _demo_guard()
     llm.save_config(
         req.base_url, req.api_key, req.model,
         vision_model=req.vision_model,
@@ -70,7 +65,6 @@ def save(req: LLMConfigReq, request: Request):
 @router.post("/test")
 def test(request: Request):
     _ctrl_guard(request)
-    _demo_guard()
     return llm.test()
 
 
