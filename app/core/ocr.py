@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import re
 import time
@@ -23,6 +24,28 @@ ALLOWED_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/hei
 # 纯文本回退用：教材题号前缀（"3. "）、拒绝话术
 _NUM_PREFIX = re.compile(r"^\s*\d+\s*[.、)）:：]\s*")
 _REFUSAL = re.compile(r"无法识别|看不清|不能识别|抱歉|sorry|cannot", re.I)
+# 小模型照抄提示词模板的 note 特征
+_NOTE_ECHO = re.compile(r"没有就|题目里的文字要求|空串")
+# 纯文本回退要挡掉的 JSON 特征：整段 {"found":...} 被当题面塞给学生的丑态绝不能再出现
+_JSON_LOOK = re.compile(r'^\s*\{|\s*"(?:found|latex|note)"\s*:')
+# 兜底抠字段：JSON 整体解析失败但 latex 字符串本身写对了，直接按引号配对抠出来
+_LATEX_FIELD = re.compile(r'"latex"\s*:\s*"((?:[^"\\]|\\.)*)"', re.S)
+
+
+def _salvage_latex(raw: str) -> str:
+    """JSON 解析失败时的最后抢救：正则抠出 "latex" 字段再反转义。
+
+    parse_json 失败多半是 JSON 别处坏了（控制字符、截断），但 latex 那个
+    字符串本身可能是完好的——直接丢掉太可惜。先过 repair_json 把 LaTeX
+    反斜杠修对，再反转义；抠不到就空串，绝不把 JSON 原文当题面。
+    """
+    m = _LATEX_FIELD.search(llm.repair_json(raw or ""))
+    if not m:
+        return ""
+    try:
+        return json.loads('"' + m.group(1) + '"').strip()
+    except Exception:
+        return m.group(1).strip()
 
 
 def _plain_transcription(raw: str) -> str:
@@ -30,13 +53,14 @@ def _plain_transcription(raw: str) -> str:
 
     文本像一道题（有实际内容、不是拒绝话术）就整段当题面用——识别结果
     反正要学生过目确认，宁可用上，别白白报"没认出数学题"。
-    拒绝话术 / 太短 / 太长的仍然当失败。
+    拒绝话术 / 太短 / 太长 / 长得像 JSON 的仍然当失败——像 JSON 说明
+    parse 环节已经失败过一次，把原文塞给学生只会看到一坨大括号。
     """
     t = (raw or "").strip()
     t = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", t).strip()   # 万一包了代码块
     t = _NUM_PREFIX.sub("", t)                                # "3. 求函数…" → "求函数…"
     t = re.sub(r"\s+", " ", t)
-    if not (4 <= len(t) <= 500) or _REFUSAL.search(t):
+    if not (4 <= len(t) <= 500) or _REFUSAL.search(t) or _JSON_LOOK.search(t):
         return ""
     return t
 
@@ -50,8 +74,12 @@ def _latex_delims(s: str) -> str:
 
 SYSTEM = """你是题目转写器。把图片里的数学题抄成 LaTeX，不做任何解答。
 
-只输出 JSON：
-{"found":true,"latex":"题目的 LaTeX，行内公式用 $...$","note":"题目里的文字要求(没有就空串)"}
+只输出 JSON，三个字段：
+{"found":true,"latex":"...","note":"..."}
+
+字段说明：
+- latex：题目的 LaTeX，行内公式用 $...$
+- note：题目文字要求的原文（例："求 x=1 处的导数"），没有就填 ""
 
 规则：
 1. 只转写，不解释、不化简、不改数字、不补条件。
@@ -135,10 +163,13 @@ def extract(data: bytes, declared_mime: str | None = None) -> dict:
     data_json = llm.parse_json(raw) or {}
     latex = (data_json.get("latex") or "").strip()
     if not latex and not data_json:
-        # JSON 没解析出来：专用 OCR 模型多半直接输出了纯文本转写
-        latex = _plain_transcription(raw)
+        # JSON 没解析出来：先试着从坏 JSON 里直接抠 latex 字段，
+        # 抠不到且整段像纯文本转写才用纯文本；都不行就当失败，
+        # 坚决不把 {"found":true,...} 这类原文塞进题面
+        latex = _salvage_latex(raw) or _plain_transcription(raw)
         if latex:
-            log.info("OCR 非 JSON 输出，按纯文本转写采用")
+            log.info("OCR 非 JSON 输出，%s采用",
+                     "从 latex 字段抢救" if _LATEX_FIELD.search(raw) else "按纯文本转写")
     latex = _latex_delims(latex) if latex else latex
     if not data_json.get("found", bool(latex)) or not latex:
         log.info("OCR 未认出数学题（%dms）· 模型原话开头：%s",
@@ -147,13 +178,17 @@ def extract(data: bytes, declared_mime: str | None = None) -> dict:
                 "message": "这张图里没认出数学题，换个角度重拍，或者直接打进来。"}
 
     used = llm._last_route  # noqa: SLF001  仅日志用途
+    # 小模型会把提示词里的字段说明原样抄回 note（"题目里的文字要求(没有就空串)"）
+    note = data_json.get("note", "") or ""
+    if _NOTE_ECHO.search(note):
+        note = ""
     log.info("OCR 成功 · %s@%s · %dms · latex %d 字",
              used.get("model", "?"), used.get("name", "?"),
              int((time.time() - t0) * 1000), len(latex))
     return {
         "ok": True,
         "latex": latex,
-        "note": data_json.get("note", "") or "",
+        "note": note,
         # 如实上报实际干活的那个端点：本地 minicpm-ocr 识别时，
         # 以前这里写死云端 vision_model，排查"为什么没用本地模型"会被带偏
         "engine": "vision · {model} @ {name}".format(

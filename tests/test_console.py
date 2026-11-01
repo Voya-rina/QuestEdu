@@ -198,8 +198,7 @@ class TestDevicePerm(unittest.TestCase):
                         headers=student_headers()).status_code, 403)
 
     def test_devices_endpoint_lists_perm(self):
-        # 新语义：设备**新连接**时权限一律重置回 MOCK；在线期间授权，
-        # 持续在线则保留；掉线重连（超过在线窗口）后回到 MOCK。
+        # 授权跟随 IP 持久化：掉线重连（超过在线窗口）权限保持不变
         console_data.touch("10.9.9.9")                          # 先上线
         console_data.set_device_perm("10.9.9.9", "server")      # 在线期间授权
         console_data.touch("10.9.9.9")                          # 持续在线：保留
@@ -211,7 +210,14 @@ class TestDevicePerm(unittest.TestCase):
         console_data.touch("10.9.9.9")
         d = client.get("/api/console/devices").json()
         row = next(x for x in d["devices"] if x["ip"] == "10.9.9.9")
-        self.assertEqual(row["perm"], "mock")
+        self.assertEqual(row["perm"], "server")
+        # 配置权限端点能看到这台设备；收回后消失
+        perms = client.get("/api/console/perms").json()["devices"]
+        self.assertIn("10.9.9.9", [x["ip"] for x in perms])
+        client.post("/api/console/device-perm",
+                    json={"ip": "10.9.9.9", "perm": "mock"})
+        perms = client.get("/api/console/perms").json()["devices"]
+        self.assertNotIn("10.9.9.9", [x["ip"] for x in perms])
 
 
 class TestSessionDelete(unittest.TestCase):

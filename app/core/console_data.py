@@ -95,6 +95,13 @@ def set_device_perm(ip: str, perm: str) -> str:
             pass
         return _PERMS.get(ip, "mock")
 
+
+def server_perms() -> list[dict]:
+    """所有被授予服务端权限的设备（ID + IP），控制台"配置权限"弹窗用。"""
+    with _PERM_LOCK:
+        ips = sorted(_PERMS)
+    return [{"ip": ip, "label": label_for_ip(ip)} for ip in ips]
+
 _KIND_TOKENS = ("mobile", "android", "iphone", "ipad", "harmony")
 
 
@@ -107,14 +114,12 @@ def touch(ip: str, ua: str = "", sid: str = "",
           cur=None, total=None) -> None:
     """记录/刷新一台设备的心跳。
 
-    每次**新连接**（90 秒内没见过）都把该设备权限重置回 MOCK：
-    授权只在设备持续在线期间有效，重连一律从离线题库重新开始——
-    控制台要给谁开服务端权限，就趁它在线时再点一次。
+    授权跟着 IP 持久化（data/device_perms.json）：掉线重连权限保持不变，
+    不用重新授权；要收回在控制台点一下即可。
     """
     now = time.time()
     with _lock:
         prev = _devices.get(ip) or {}
-        fresh = (not prev) or (now - prev.get("seen", 0) > ONLINE_WINDOW)
         _devices[ip] = {
             "ip": ip,
             "label": label_for_ip(ip),
@@ -125,17 +130,6 @@ def touch(ip: str, ua: str = "", sid: str = "",
             "seen": now,
             "first": prev.get("first", now),
         }
-    if fresh:
-        _reset_perm(ip)
-
-
-def _reset_perm(ip: str) -> None:
-    with _PERM_LOCK:
-        if _PERMS.pop(ip, None) is not None:
-            try:
-                _PERM_FILE.write_text(json.dumps(sorted(_PERMS)), encoding="utf-8")
-            except Exception:
-                pass
 
 
 def _row(d: dict, now: float, online: bool) -> dict:

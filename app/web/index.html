@@ -663,15 +663,15 @@ input[type=range]::-webkit-slider-thumb{
   <footer id="footer">
     <div class="choices" id="choices"></div>
     <div class="sym-strip" id="sym-strip">
-      <button class="sym" data-s="^{}" data-back="1" data-tex="x^{\square}"></button>
-      <button class="sym" data-s="_{}" data-back="1" data-tex="x_{\square}"></button>
-      <button class="sym" data-s="\log_{}{}" data-back="3" data-tex="\log_{\square}\square"></button>
-      <button class="sym" data-s="\lim_{{}\to{}} {}" data-back="10" data-tex="\lim_{\square\to\square}\square"></button>
-      <button class="sym" data-s="\sum_{i=1}^{n}" data-tex="\sum_{i=1}^{n}"></button>
-      <button class="sym" data-s="\int_{}^{}" data-back="1" data-tex="\int_{\square}^{\square}"></button>
-      <button class="sym" data-s="sqrt()" data-back="1" data-tex="\sqrt{\square}"></button>
+      <button class="sym" data-s="^{}" data-back="1" data-tex="x^{\square}">x^□</button>
+      <button class="sym" data-s="_{}" data-back="1" data-tex="x_{\square}">x_□</button>
+      <button class="sym" data-s="\log_{}{}" data-back="3" data-tex="\log_{\square}\square">log_□□</button>
+      <button class="sym" data-s="\lim_{{}\to{}} {}" data-back="10" data-tex="\lim_{\square\to\square}\square">lim□→□</button>
+      <button class="sym" data-s="\sum_{i=1}^{n}" data-tex="\sum_{i=1}^{n}">Σ(i=1→n)</button>
+      <button class="sym" data-s="\int_{}^{}" data-back="1" data-tex="\int_{\square}^{\square}">∫□^□</button>
+      <button class="sym" data-s="sqrt()" data-back="1" data-tex="\sqrt{\square}">√□</button>
       <button class="sym" data-s="/">/</button>
-      <button class="sym" data-s="()" data-back="1" data-tex="(\,\square\,)"></button>
+      <button class="sym" data-s="()" data-back="1" data-tex="(\,\square\,)">( )</button>
       <button class="sym" data-s="-">−</button>
       <button class="sym" id="sym-greek" title="希腊字母">α β γ</button>
       <button class="sym gk" data-s="α">α</button>
@@ -694,11 +694,11 @@ input[type=range]::-webkit-slider-thumb{
       <button class="sym gk" data-s="Σ">Σ</button>
       <button class="sym gk" data-s="Φ">Φ</button>
       <button class="sym gk" data-s="Ω">Ω</button>
-      <button class="sym gk" data-s="∞" data-tex="\infty"></button>
-      <button class="sym gk" data-s="≤" data-tex="\leq"></button>
-      <button class="sym gk" data-s="≥" data-tex="\geq"></button>
-      <button class="sym gk" data-s="≠" data-tex="\neq"></button>
-      <button class="sym gk" data-s="±" data-tex="\pm"></button>
+      <button class="sym gk" data-s="∞" data-tex="\infty">∞</button>
+      <button class="sym gk" data-s="≤" data-tex="\leq">≤</button>
+      <button class="sym gk" data-s="≥" data-tex="\geq">≥</button>
+      <button class="sym gk" data-s="≠" data-tex="\neq">≠</button>
+      <button class="sym gk" data-s="±" data-tex="\pm">±</button>
     </div>
     <div class="composer">
       <textarea id="input" rows="1" placeholder="说说你的想法…"></textarea>
@@ -1453,6 +1453,7 @@ async function boot(){
   $('#input').addEventListener('focus', () => setTimeout(() => { fitViewport(); scrollEnd(); }, 320));
 
   initPbarDrag();
+  paintSymStrip();
   initDemoLock();
   // 一对多的权限边界：设置/入口管理是控制端专属。按钮默认不渲染——
   // 观众手再快也点不进一个还没出现的界面。两种情况显示：
@@ -2363,20 +2364,44 @@ function insertAtCursor(el, text, back){
   el.setSelectionRange(np, np);
   el.focus();
 }
-$('#sym-strip').addEventListener('pointerdown', e => {
+/* 输入辅助条：点一下把符号塞进光标处（手机键盘打 ^ {} 这类太费劲）。
+   插入延迟到 pointerup：横滑浏览符号条也是 pointerdown 起步，
+   直接在 down 里插入会把"滑一下"判成"点一下"——
+   走过 8px 或触发了原生滚动（pointercancel）就不算点击。 */
+let SYM_PENDING = null;
+const symStrip = $('#sym-strip');
+symStrip.addEventListener('pointerdown', e => {
   const b = e.target.closest('.sym');
   if(!b) return;
   e.preventDefault();          // 别让点按钮把输入框焦点抢走
+  SYM_PENDING = {b, x: e.clientX, y: e.clientY, ok: true};
+});
+symStrip.addEventListener('pointermove', e => {
+  if(!SYM_PENDING) return;
+  if(Math.hypot(e.clientX - SYM_PENDING.x, e.clientY - SYM_PENDING.y) > 8){
+    SYM_PENDING.ok = false;
+  }
+});
+symStrip.addEventListener('pointerup', () => {
+  const st = SYM_PENDING;
+  SYM_PENDING = null;
+  if(!st || !st.ok) return;
+  const b = st.b;
   if(b.id === 'sym-greek'){    // 希腊字母：展开/收起，不插字符
-    $('#sym-strip').classList.toggle('greek');
+    symStrip.classList.toggle('greek');
     return;
   }
   if(b.dataset.s) insertAtCursor(input, b.dataset.s, +(b.dataset.back || 0));
 });
-// 按钮上的数学式用 KaTeX 画出来（□ 是待填的空），学生看得懂才点得准
-document.querySelectorAll('#sym-strip .sym[data-tex]').forEach(b => {
-  try{ katex.render(b.dataset.tex, b, {throwOnError:false}); }catch(err){}
-});
+symStrip.addEventListener('pointercancel', () => { SYM_PENDING = null; });
+// katex.min.js 是 defer 加载的，内联脚本跑的时候它还没就绪——
+// 渲染必须等 boot()（DOMContentLoaded），失败时按钮留着纯文本兜底
+function paintSymStrip(){
+  if(!window.katex) return;
+  document.querySelectorAll('#sym-strip .sym[data-tex]').forEach(b => {
+    try{ katex.render(b.dataset.tex, b, {throwOnError:false}); }catch(err){}
+  });
+}
 
 /* 右上角刷新：重新拉题库与配置；正在做题时先确认，别一挥手就丢进度 */
 $('#refresh-btn').onclick = () => {

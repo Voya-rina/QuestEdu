@@ -154,6 +154,16 @@ def device_perm(req: DevicePermReq, request: Request = None):
     return {"ip": req.ip, "perm": perm}
 
 
+@router.get("/api/console/perms")
+def perms(request: Request = None):
+    """所有被授予服务端权限的设备（ID + IP）。
+
+    "配置权限"弹窗的数据源；收回权限复用 POST /device-perm（perm=mock）。
+    """
+    _guard(request)
+    return {"devices": console_data.server_perms()}
+
+
 @router.post("/api/console/mode")
 def switch_mode(req: ModeReq, request: Request = None):
     """快捷切换运行方案（离线/云端/本地/混合），其余配置项原样保留。

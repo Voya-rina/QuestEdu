@@ -36,6 +36,7 @@ def create_session(req: CreateSessionReq, request: Request):
         perm = console_data.device_perm(_client_ip(request))
     # 学生身份就是 IP：服务端算 #xxxx 标签，存进 sessions.user
     label = console_data.label_for_ip(_client_ip(request))
+    llm.set_call_context(user=label)     # 拆题期间的 LLM 调用日志带上用户指纹
     cancel = llm.cancel_register(req.req_id) if req.req_id else None
     try:
         sess, payload = Engine.create(
@@ -78,6 +79,11 @@ def get_session(sid: str):
     }
 
 
+def _with_ctx(sess, sid: str) -> None:
+    """后续追问/自评/变式的 LLM 调用日志带上用户指纹与会话 ID。"""
+    llm.set_call_context(user=(getattr(sess, "user", "") or ""), sid=sid)
+
+
 @router.post("/{sid}/messages")
 def send_message(sid: str, req: AnswerReq):
     if not req.text.strip():
@@ -85,6 +91,7 @@ def send_message(sid: str, req: AnswerReq):
     # 同一会话串行：两台设备同时答同一题时不会互相踩状态
     with session_lock(sid):
         sess = store.get(sid)
+        _with_ctx(sess, sid)
         res = Engine.answer(sess, req.text.strip())
         store.save(sess)          # 引擎改的是内存对象，这里整体落盘
     return res
@@ -94,6 +101,7 @@ def send_message(sid: str, req: AnswerReq):
 def self_assessment(sid: str, req: AssessReq):
     with session_lock(sid):
         sess = store.get(sid)
+        _with_ctx(sess, sid)
         res = Engine.self_assess(sess, req.score)
         store.save(sess)
     return res
@@ -103,6 +111,7 @@ def self_assessment(sid: str, req: AssessReq):
 def make_variant(sid: str):
     with session_lock(sid):
         sess = store.get(sid)
+        _with_ctx(sess, sid)
         res = Engine.make_variant(sess)
         store.save(sess)
     return res
@@ -112,6 +121,7 @@ def make_variant(sid: str):
 def answer_variant(sid: str, req: AnswerReq):
     with session_lock(sid):
         sess = store.get(sid)
+        _with_ctx(sess, sid)
         res = Engine.judge_variant(sess, req.text.strip())
         store.save(sess)
     return res

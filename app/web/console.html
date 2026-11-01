@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>学问 QuestEdu 控制台</title>
+<link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+<script defer src="/static/vendor/katex/katex.min.js"></script>
+<script defer src="/static/vendor/katex/contrib/auto-render.min.js"></script>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 :root{
@@ -162,6 +165,7 @@ button.chip:hover{border-color:var(--brand)}
 /* 最近会话：单行 "#xxxx - 题目 - 多久前"，超长省略 */
 .sess-line{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px}
 .sess-line .ago{color:var(--muted);font-size:11.5px}
+.sess-line .sid{color:var(--muted);font-family:var(--mono);font-size:11.5px}
 .perm-btn{
   flex:none;padding:3px 10px;border-radius:12px;font-size:11.5px;font-family:inherit;
   border:1px solid var(--line);background:#F2F3F6;color:#5C626B;cursor:pointer;
@@ -230,6 +234,7 @@ button.chip:hover{border-color:var(--brand)}
 .dot{width:8px;height:8px;border-radius:50%;flex:none}
 .dot.ok{background:var(--green)} .dot.bad{background:var(--red)}
 .call .t{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.call .who{color:var(--brand);font-weight:600;font-size:12px;white-space:nowrap}
 .call .model{font-weight:600}
 .call .ms{margin-left:auto;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
 .call .tk{color:var(--muted);font-size:11.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -384,6 +389,9 @@ button.chip:hover{border-color:var(--brand)}
           <button class="op" id="open-settings">
             <span>模型设置</span>
             <span class="tri" aria-hidden="true"></span></button>
+          <button class="op" id="perm-manage" style="grid-column:1/-1">
+            <span>配置权限</span>
+            <span class="sub" id="perm-count" style="font-size:12px;color:var(--muted)"></span></button>
         </div>
       </div>
     </section>
@@ -463,6 +471,17 @@ button.chip:hover{border-color:var(--brand)}
       <button class="linkbtn" id="sm-refresh">刷新</button>
       <span id="sm-foot"></span>
     </div>
+  </div>
+</div>
+
+<div class="modal" id="perm-modal">
+  <div class="modal-card">
+    <div class="modal-h">
+      <h3>已授权设备</h3>
+      <span class="sub">被允许使用服务端运行方案的设备，点右侧收回</span>
+      <button class="modal-x" id="pm-close">✕</button>
+    </div>
+    <div class="modal-body" id="pm-body"></div>
   </div>
 </div>
 
@@ -568,6 +587,28 @@ async function copyText(t){
 
 function esc(s){
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/* 会话监控里的公式渲染：助教说的话带 LaTeX，不渲染就是一串反斜杠 */
+const TEX_OPTS = {
+  delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false},
+    {left:'\\(',right:'\\)',display:false},
+  ],
+  throwOnError:false
+};
+function texIn(el){
+  if(!el) return;
+  if(window.renderMathInElement){ try{ renderMathInElement(el, TEX_OPTS); }catch(e){} return; }
+  let n = 0;
+  const t = setInterval(() => {
+    if(window.renderMathInElement){
+      clearInterval(t);
+      try{ renderMathInElement(el, TEX_OPTS); }catch(e){}
+    } else if(++n > 60){ clearInterval(t); }
+  }, 100);
 }
 
 async function loadOverview(){
@@ -719,7 +760,7 @@ function paintSessions(sessions){
   const row = s => `
     <div class="dev sess-row" data-id="${esc(s.id)}">
       <span class="st ${s.status === 'running' ? '' : 'off'}"></span>
-      <span class="sess-line"><b>${esc(s.user) || '#未知'}</b> - ${esc((s.subject || s.problem || '未分类').slice(0, 24))} - <span class="ago">${fmtAge(s.age_s)}</span></span>
+      <span class="sess-line"><b>${esc(s.user) || '#未知'}</b> · <span class="sid">${esc(String(s.id || '').slice(0, 10))}</span> - ${esc((s.subject || s.problem || '未分类').slice(0, 24))} - <span class="ago">${fmtAge(s.age_s)}</span></span>
       ${MANAGE ? `<button class="del-btn" data-del="${esc(s.id)}">✕</button>` : ''}
     </div>`;
   box.innerHTML = running.map(row).join('') + done.map(row).join('')
@@ -790,7 +831,7 @@ async function loadSession(){
   catch(e){ closeSession(); return; }
   const stZh = {running:'进行中', finished:'已答完待自评', assessed:'已自评', closed:'已超时关闭'}[d.status] || d.status;
   $('#sm-title').textContent = (d.user || '#未知') + ' · ' + (d.subject || '未分类');
-  $('#sm-sub').textContent = `${stZh} · 进度 ${d.progress[0]}/${d.progress[1]}` +
+  $('#sm-sub').textContent = `#${d.id} · ${stZh} · 进度 ${d.progress[0]}/${d.progress[1]}` +
     (d.self_score != null ? ` · 自评 ${d.self_score}/5` : '') +
     (d.mode ? ` · ${d.mode}` : '');
   const roleZh = {student: '学生', assistant: '助教'};
@@ -800,6 +841,8 @@ async function loadSession(){
     return `<div class="${cls}">${chip}${esc(m.text)}${m.at ? `<span class="at">${esc(m.at)}</span>` : ''}</div>`;
   }).join('') || '<div class="empty">还没有对话</div>';
   const body = $('#sm-body');
+  // 助教消息（含红色预警）里的 LaTeX 渲染掉；学生输入原样展示
+  body.querySelectorAll('.msg.assistant, .msg.warn').forEach(texIn);
   body.scrollTop = body.scrollHeight;
   $('#sm-foot').textContent =
     d.variant_problem ? '变式题：' + d.variant_problem.slice(0, 46) : '';
@@ -820,6 +863,48 @@ $('#sm-refresh').onclick = loadSession;
 $('#sm-close').onclick = closeSession;
 $('#sess-modal').addEventListener('click', e => {
   if(e.target === e.currentTarget) closeSession();
+});
+
+/* ---------- 配置权限：所有被授予服务端权限的设备 + 收回 ---------- */
+async function loadPerms(){
+  let r;
+  try{ r = await api('/api/console/perms'); }
+  catch(e){
+    $('#pm-body').innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
+    return;
+  }
+  const ds = r.devices || [];
+  $('#perm-count').textContent = ds.length ? ds.length + ' 台已授权' : '';
+  $('#pm-body').innerHTML = ds.length ? ds.map(d => `
+    <div class="dev">
+      <span class="st"></span>
+      <span class="who">
+        <span class="who-line"><b>${esc(d.label || d.ip)}</b></span>
+        <span class="ip">${esc(d.ip)}</span>
+      </span>
+      <button class="perm-btn on" data-ip="${esc(d.ip)}">移除权限</button>
+    </div>`).join('')
+    : '<div class="empty">还没有设备被授权。<br>在「在线设备与用户」里点设备的 MOCK / 服务端 按钮即可授权。</div>';
+  $('#pm-body').querySelectorAll('.perm-btn').forEach(b => {
+    b.onclick = async () => {
+      if(!confirm('收回 ' + b.dataset.ip + ' 的服务端权限？该设备将只能用离线题库。')) return;
+      try{
+        await api('/api/console/device-perm', {ip: b.dataset.ip, perm: 'mock'});
+        toast('已收回权限');
+        loadPerms();
+        loadOverview();
+      }catch(err){ toast(err.message, true); }
+    };
+  });
+}
+
+$('#perm-manage').onclick = () => {
+  $('#perm-modal').classList.add('show');
+  loadPerms();
+};
+$('#pm-close').onclick = () => $('#perm-modal').classList.remove('show');
+$('#perm-modal').addEventListener('click', e => {
+  if(e.target === e.currentTarget) $('#perm-modal').classList.remove('show');
 });
 
 function paintStats(st){
@@ -899,11 +984,13 @@ function paintCalls(calls){
       <div class="row1">
         <span class="dot ${c.ok ? 'ok' : 'bad'}"></span>
         <span class="t">${esc(c.ts)}</span>
+        ${c.user ? `<span class="who">${esc(c.user)}</span>` : ''}
         <span class="model">${esc(c.route)} · ${esc(c.model)}</span>
         <span class="tk">输入 ${c.tin ?? c["in"]} tok | 输出 ${c.tout ?? c.out} tok${c.ok ? '' : ' · 点击看错误'}</span>
         <span class="ms">${c.ok ? c.ms + 'ms' : '失败'}</span>
       </div>
       <div class="detail">
+        ${c.user || c.sid ? `<b>调用方</b><div class="txt">${esc([c.user, c.sid].filter(Boolean).join(' · '))}</div>` : ''}
         ${c.err ? `<b>错误</b><div class="txt err">${esc(c.err)}</div>` : ''}
         ${c.reply ? `<b>回复摘要</b><div class="txt">${esc(c.reply)}</div>` : ''}
       </div>

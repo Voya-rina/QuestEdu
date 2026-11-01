@@ -19,6 +19,7 @@ import logging
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from app.core.engine import Engine
+from app.core.llm import set_call_context
 from app.core.store import session_lock, store
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ async def chat_stream(ws: WebSocket):
             # 与 POST /messages 用同一把会话锁：WS 和 HTTP 同时打进来也不踩。
             # 整段丢进线程池：Engine.answer 里可能同步等 LLM 好几分钟，
             # 直接在事件循环上跑会把整个服务（其他设备的全部请求）一起冻住
+            # 上下文在这里设置：to_thread 会把它复制进工作线程，LLM 日志带上指纹
+            set_call_context(user=(getattr(sess, "user", "") or ""), sid=sid)
+
             def _answer_locked():
                 with session_lock(sid):
                     res = Engine.answer(sess, text)

@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import contextvars
 import threading
 import time
 from collections import deque
@@ -32,15 +33,47 @@ _last_route: dict = {}       # 最近一次成功请求走的端点（name + mod
 # ---------------------------------------------------------------- 调用日志
 # 控制台 Dashboard 的"LLM 调用流"数据源：每次成功/失败都记一条（环形 200 条），
 # 记输入/输出规模、耗时、错误与回复摘要——答辩排查"模型到底回了什么"全靠它。
+# 每条还带上调用上下文（用户指纹 #xxxxxx + 会话 ID）：路由层进来时设置，
+# 一对多场景下光看日志就知道这次调用是替谁、哪道题发的。
 _call_seq = 0
 _call_log: deque = deque(maxlen=200)
 _call_lock = threading.Lock()
+
+_call_ctx: contextvars.ContextVar = contextvars.ContextVar("qe_llm_call_ctx",
+                                                           default=None)
+
+
+def set_call_context(user: str = "", sid: str = "") -> None:
+    """标记"当前请求在替谁、哪场会话调 LLM"。
+
+    contextvars 保证并发请求互不串线：sync 路由跑在线程池里各自带一份上下文，
+    WS 处理器里 asyncio.to_thread 也会把上下文复制进工作线程。
+    """
+    cur = dict(_call_ctx.get() or {})
+    if user:
+        cur["user"] = user
+    if sid:
+        cur["sid"] = sid
+    _call_ctx.set(cur)
+
+
+def _ctx_user_sid() -> tuple[str, str]:
+    d = _call_ctx.get() or {}
+    return d.get("user", ""), d.get("sid", "")
+
+
+def _ctx_suffix() -> str:
+    """拼进日志行的调用方后缀，如 " · #A1B2C3 · s4f5g6h7"；没有就空串。"""
+    user, sid = _ctx_user_sid()
+    parts = [p for p in (user, sid) if p]
+    return (" · " + " · ".join(parts)) if parts else ""
 
 
 def _log_call(route: dict, ok: bool, ms: int, n_in: int, n_out: int,
               err: str = "", reply: str = "",
               tin: int | None = None, tout: int | None = None) -> None:
     global _call_seq
+    user, sid = _ctx_user_sid()
     with _call_lock:
         _call_seq += 1
         _call_log.append({
@@ -53,6 +86,7 @@ def _log_call(route: dict, ok: bool, ms: int, n_in: int, n_out: int,
             "tin": tin, "tout": tout,
             "err": (err or "")[:300],
             "reply": (reply or "")[:800],
+            "user": user, "sid": sid,
         })
 
 
@@ -530,8 +564,9 @@ def _send_http(route: dict, messages: list, temperature: float,
         _last_usage.update(usage)
         globals()["_last_route"] = {"name": route["name"], "model": route["model"]}
         out = content_of(choice)
-        log.info("LLM %s · %s · %dms · 回复 %d 字",
-                 route["name"], route["model"], int((time.time() - t0) * 1000), len(out))
+        log.info("LLM %s · %s · %dms · 回复 %d 字%s",
+                 route["name"], route["model"], int((time.time() - t0) * 1000), len(out),
+                 _ctx_suffix())
         _log_call(route, True, int((time.time() - t0) * 1000), prompt_chars, len(out),
                   reply=out,
                   tin=int(usage.get("prompt_tokens") or 0) or None,
