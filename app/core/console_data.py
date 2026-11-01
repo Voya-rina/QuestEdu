@@ -34,6 +34,48 @@ except Exception:
     _PERMS = {}
 
 
+# ---------------------------------------------------------------- IP → 显示标签
+#
+# 设备没有用户名概念，IP 就是身份。#xxxx 是它对外的名字：4 位十六进制
+# 取自 IP 的哈希，同一 IP 永远同一个标签，重启不漂移。字典持久化在
+# data/ip_labels.json——这就是"IP 地址的字典，保存在服务端"。
+
+_LABELS: dict[str, str] = {}
+_LABEL_FILE = DATA_DIR / "ip_labels.json"
+_LABEL_LOCK = threading.Lock()
+
+try:
+    if _LABEL_FILE.exists():
+        _LABELS = {k: v for k, v in json.loads(_LABEL_FILE.read_text(encoding="utf-8")).items()
+                   if isinstance(k, str) and isinstance(v, str)}
+except Exception:
+    _LABELS = {}
+
+
+def label_for_ip(ip: str) -> str:
+    """取（或分配）一个 IP 的显示标签 #xxxx。"""
+    import hashlib
+
+    ip = (ip or "").strip() or "unknown"
+    with _LABEL_LOCK:
+        lab = _LABELS.get(ip)
+        if lab:
+            return lab
+        digest = hashlib.md5(ip.encode("utf-8")).hexdigest()
+        lab = "#" + digest[:4]
+        n = 0
+        while lab in _LABELS.values() and n < len(digest) - 4:
+            n += 1
+            lab = "#" + digest[n:n + 4]
+        _LABELS[ip] = lab
+        try:
+            _LABEL_FILE.write_text(json.dumps(_LABELS, ensure_ascii=False, indent=1),
+                                   encoding="utf-8")
+        except Exception:
+            pass
+        return lab
+
+
 def device_perm(ip: str) -> str:
     """设备权限：mock（只能用离线题库）或 server（走服务端当前运行方案）。"""
     with _PERM_LOCK:
@@ -60,7 +102,7 @@ def _kind(ua: str) -> str:
     return "手机" if any(k in ua for k in _KIND_TOKENS) else "电脑"
 
 
-def touch(ip: str, user: str = "", ua: str = "", sid: str = "",
+def touch(ip: str, ua: str = "", sid: str = "",
           cur=None, total=None) -> None:
     """记录/刷新一台设备的心跳。
 
@@ -74,7 +116,7 @@ def touch(ip: str, user: str = "", ua: str = "", sid: str = "",
         fresh = (not prev) or (now - prev.get("seen", 0) > ONLINE_WINDOW)
         _devices[ip] = {
             "ip": ip,
-            "user": (user or "").strip()[:64] or prev.get("user", ""),
+            "label": label_for_ip(ip),
             "kind": _kind(ua),
             "sid": (sid or "").strip() or prev.get("sid", ""),
             "cur": cur if isinstance(cur, int) else prev.get("cur"),

@@ -12,7 +12,7 @@ import io
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
-from app.core import access
+from app.core import access, console_data
 from app.core.engine import Engine
 from app.core.store import store
 
@@ -24,16 +24,23 @@ def _is_controller(request: Request) -> bool:
     return access.is_controller(peer, request.headers)
 
 
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return access.normalize_peer(xff.split(",")[0].strip())
+    return access.normalize_peer(request.client.host if request.client else "")
+
+
 @router.get("/history")
 def history(limit: int = 30, user: str = "", request: Request = None):
     """首页「学习记录」：最近会话的轻量列表。
 
     故意不走 store.get()——那条路会把每条消息都拉出来，列表页用不上。
     直接查 sessions 表，汇总字段从 JSON 列里现场算。
-    传了 user 就只看这个人的：记录按用户分开，不堆在一起。
 
-    权限：非控制端必须带 user——观众设备不该有能力翻所有人的记录；
-    控制端（演示者的电脑）不带 user 时可以看到全部，便于排查。
+    记录归属：学生身份就是 IP，sessions.user 存的是服务端算的 #xxxx 标签。
+    非控制端一律强制只看自己 IP 的记录；控制端（演示者的电脑）不带 user
+    可以看到全部，便于排查。
     """
     from sqlalchemy import select
 
@@ -42,8 +49,8 @@ def history(limit: int = 30, user: str = "", request: Request = None):
     from app.models import SessionRow
 
     _store.close_stale()      # 打开列表前先关掉超时挂着的"进行中"
-    if request is not None and not user.strip() and not _is_controller(request):
-        raise HTTPException(403, "学习记录按用户查询，请带上 user 参数")
+    if request is not None and not _is_controller(request):
+        user = console_data.label_for_ip(_client_ip(request))
 
     limit = max(1, min(100, limit))
     stmt = select(SessionRow).order_by(SessionRow.created_at.desc()).limit(limit)

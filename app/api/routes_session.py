@@ -34,10 +34,12 @@ def create_session(req: CreateSessionReq, request: Request):
         perm = "server"
     else:
         perm = console_data.device_perm(_client_ip(request))
+    # 学生身份就是 IP：服务端算 #xxxx 标签，存进 sessions.user
+    label = console_data.label_for_ip(_client_ip(request))
     cancel = llm.cancel_register(req.req_id) if req.req_id else None
     try:
         sess, payload = Engine.create(
-            req.problem.strip(), req.problem_id, req.user.strip(),
+            req.problem.strip(), req.problem_id, label,
             mode="mock" if perm == "mock" else "",
             cancel=cancel,
         )

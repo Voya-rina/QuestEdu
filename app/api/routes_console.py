@@ -36,13 +36,14 @@ def _guard(request: Request) -> None:
 
 @router.post("/api/heartbeat")
 def heartbeat(req: HeartbeatReq, request: Request):
-    """学生页心跳：上报当前用户、会话与进度（在线设备列表的数据源）。
+    """学生页心跳：上报当前会话与进度（在线设备列表的数据源）。
 
+    学生身份就是 IP——服务端按它算 #xxxx 标签，前端不用上报名字。
     顺带把该设备的「生效方案」带回去：控制台改了权限或换了运行方案，
     学生端最多 25 秒就能感知并自刷新，不用重新扫码。
     """
     ip = _client_ip(request)
-    console_data.touch(ip, req.user, request.headers.get("user-agent", ""),
+    console_data.touch(ip, request.headers.get("user-agent", ""),
                        req.sid, req.cur, req.total)
     is_ctrl = access.is_controller(_peer(request), request.headers)
     perm = "server" if is_ctrl else console_data.device_perm(ip)

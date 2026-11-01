@@ -38,13 +38,6 @@ header{
 }
 .brand{font-weight:600;font-size:16px;letter-spacing:.5px}
 .brand em{font-style:normal;font-weight:400;font-size:11px;color:var(--muted);margin-left:6px;letter-spacing:.5px}
-.user-chip{
-  flex:0 0 auto;display:inline-flex;align-items:center;max-width:30vw;
-  border:1px solid var(--line);background:#fff;border-radius:20px;
-  padding:5px 11px;font-family:inherit;font-size:12px;color:#5C626B;
-  cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-}
-.user-chip:active{background:#F2F3F6}
 .dots{display:flex;gap:5px;align-items:center;margin-left:auto}
 .gear{
   flex:0 0 auto;width:30px;height:30px;margin-left:9px;padding:0;border-radius:var(--r-sm);
@@ -615,7 +608,6 @@ input[type=range]::-webkit-slider-thumb{
       </svg>
     </button>
     <div class="brand">学问<em>QUESTEDU</em></div>
-    <button class="user-chip" id="user-chip" style="display:none"></button>
     <div class="dots" id="dots"><span class="count" id="count"></span></div>
     <button class="gear" id="refresh-btn" aria-label="刷新页面">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -694,15 +686,6 @@ input[type=range]::-webkit-slider-thumb{
     <div class="wait-sub" id="wait-sub"></div>
     <ul class="wait-tips" id="wait-tips" style="display:none"></ul>
     <button class="btn ghost" id="wait-cancel">先不做了</button>
-  </div>
-</div>
-
-<div class="sheet" id="sheet-user">
-  <div class="sheet-body confirm">
-    <h3>先记个名字</h3>
-    <p class="sub">学习记录按用户分开保存，在这台设备上记住后不用再输。</p>
-    <input class="fi" id="user-input" maxlength="24" placeholder="怎么称呼你？">
-    <button class="btn" id="user-ok" style="margin-top:12px" disabled>开始用</button>
   </div>
 </div>
 
@@ -1177,37 +1160,7 @@ function showBanner(title, msg, ms){
   setTimeout(()=>b.classList.remove('show'), ms || 3600);
 }
 
-/* ---------- 用户名：学习记录按人分开 ---------- */
-const LS_USER = 'qe.user.name';
-let USER = '';
-
-function initUser(){
-  try{ USER = JSON.parse(localStorage.getItem(LS_USER)) || ''; }catch(e){ USER = ''; }
-  paintUserChip();
-  if(!USER){
-    // 首次打开：必须起个名字才能开始（点面板外不关，不给人糊弄过去）
-    openSheet('#sheet-user');
-    setTimeout(() => $('#user-input').focus(), 300);
-  }
-}
-
-function paintUserChip(){
-  const t = USER ? ('👤 ' + USER) : '';
-  $('#user-chip').textContent = t;
-  $('#user-chip').style.display = USER ? '' : 'none';
-}
-
-function commitUser(){
-  const name = $('#user-input').value.trim();
-  if(!name) return;
-  USER = name.slice(0, 24);
-  try{ localStorage.setItem(LS_USER, JSON.stringify(USER)); }catch(e){}
-  paintUserChip();
-  closeSheet('#sheet-user');
-  heartbeat();    // 换人立即上报，控制台的设备列表马上跟上
-}
-
-/* ---------- 心跳：控制台"在线设备与用户"的数据源 ----------
+/* ---------- 心跳：控制台"在线设备"的数据源 ----------
  * 响应里带本设备的生效方案：控制台改了权限/换了方案，
  * 这里感知到变化就重拉题库和控件显隐——不用重新扫码。 */
 let EFFECTIVE = '';
@@ -1215,7 +1168,7 @@ function heartbeat(){
   try{
     fetch('/api/heartbeat', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({user: USER, sid: SID || '', cur: LAST_CUR, total: LAST_TOTAL}),
+      body: JSON.stringify({sid: SID || '', cur: LAST_CUR, total: LAST_TOTAL}),
     }).then(r => r.ok ? r.json() : null).then(d => {
       if(!d || !d.perm) return;
       const sig = [d.perm, d.mode, d.ready ? 1 : 0, d.vision_ready ? 1 : 0].join(':');
@@ -1413,22 +1366,7 @@ async function boot(){
   $('#sheet-history').onclick = e => {
     if(e.target.id === 'sheet-history') closeSheet('#sheet-history');
   };
-  // 用户名：首次打开必填；之后点首页的小字可以换人
-  $('#user-ok').onclick = commitUser;
-  $('#user-input').addEventListener('input', function(){
-    $('#user-ok').disabled = !this.value.trim();
-  });
-  $('#user-input').addEventListener('keydown', e => {
-    if(e.key === 'Enter' && !e.isComposing && $('#user-input').value.trim()) commitUser();
-  });
-  const openUserSheet = () => {
-    $('#user-input').value = USER;
-    $('#user-ok').disabled = !USER;
-    openSheet('#sheet-user');
-    setTimeout(() => $('#user-input').focus(), 250);
-  };
-  $('#user-chip').onclick = openUserSheet;
-  initUser();
+  // 身份就是 IP：服务端算 #xxxx 标签，前端不用报名字
   $('#back').onclick = async () => {
     if(PHASE === 'chat' || PHASE === 'assess' || PHASE === 'variant'){
       const leave = await askLeave();
@@ -1925,7 +1863,7 @@ async function loadAccess(){
     $('#perm-card').style.display = '';
     $('#perm-list').innerHTML = (dv.devices || []).map(d => `
       <div class="lan-item">
-        <span>${d.kind === '手机' ? '📱' : '💻'} ${esc(d.user || '未署名')}
+        <span>${d.kind === '手机' ? '📱' : '💻'} ${esc(d.label || d.ip)}
           <small style="color:var(--muted);font-family:var(--mono)">${esc(d.ip)}</small></span>
         <button class="cp perm-btn ${d.perm === 'server' ? 'on' : ''}" data-ip="${esc(d.ip)}"
                 data-perm="${d.perm === 'server' ? 'server' : 'mock'}">${d.perm === 'server' ? '服务端' : 'MOCK'}</button>
@@ -2339,7 +2277,7 @@ async function start(pid, btn, problem){
   startWait('正在拆题…',
     slow ? '本地模型正在读题、拆步骤，第一次还会加载模型，可能要一两分钟。' : '');
   try{
-    const d = await api('/api/sessions', {problem_id: pid || null, problem: problem || '', user: USER, req_id: WAIT_REQ}, ac.signal);
+    const d = await api('/api/sessions', {problem_id: pid || null, problem: problem || '', req_id: WAIT_REQ}, ac.signal);
     SID = d.session_id;
     $('#home').style.display = 'none';
     const plain = (d.problem || '').indexOf('$') < 0;
@@ -2540,16 +2478,12 @@ async function openHistory(){
   showHistView('list');
   list.innerHTML = '<div class="loading"><i></i><i></i><i></i></div>';
   openSheet('#sheet-history', $('#hist-scroll'));
-  const q = USER ? ('?user=' + encodeURIComponent(USER)) : '';
   let data;
-  try{ data = await api('/api/reports/history' + q); }
+  try{ data = await api('/api/reports/history'); }
   catch(e){ list.innerHTML = '<p class="hist-empty sub">加载失败：' + e.message + '</p>'; return; }
   const items = data.sessions || [];
   if(!items.length){
-    list.innerHTML = '<p class="hist-empty sub">'
-      + (USER ? (USER + ' 还没有做过题。<br>回到首页挑一道，问答的过程都会记在这里。')
-              : '还没有做过题。<br>回到首页挑一道，问答的过程都会记在这里。')
-      + '</p>';
+    list.innerHTML = '<p class="hist-empty sub">还没有做过题。<br>回到首页挑一道，问答的过程都会记在这里。</p>';
     return;
   }
   const esc = t => String(t || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')

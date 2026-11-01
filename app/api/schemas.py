@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 class CreateSessionReq(BaseModel):
     problem: str = ""
     problem_id: str | None = None
-    user: str = Field(default="", max_length=64)   # 学习记录按用户分开保存
+    # 学生身份就是 IP（服务端算 #xxxx 标签存进 sessions.user）——前端不传名字
     # 前端生成的本次拆题请求令牌：点"先不做了"时拿它来取消，
     # 免得本地模型还在给一个已经没人等的请求卖力
     req_id: str = Field(default="", max_length=64)
@@ -29,8 +29,10 @@ class AssessReq(BaseModel):
 
 
 class HeartbeatReq(BaseModel):
-    """学生页心跳：在线设备列表的数据源。字段全可空——能带多少带多少。"""
-    user: str = Field(default="", max_length=64)
+    """学生页心跳：在线设备列表的数据源。字段全可空——能带多少带多少。
+
+    学生身份就是 IP（服务端算 #xxxx 标签），前端不用上报名字。
+    """
     sid: str = Field(default="", max_length=32)
     cur: int | None = None
     total: int | None = None
