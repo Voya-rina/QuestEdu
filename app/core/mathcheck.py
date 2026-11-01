@@ -268,6 +268,7 @@ def parse_student_expr(s: str):
     if not s or len(s) > 80:
         return None
     s = s.translate(_FULL)
+    s = latex_to_ascii(s)            # 符号条插入的 LaTeX：x^{2} → x**2、\frac{1}{2} → 1/2
     s = voice_to_expr(s)             # 语音口语：3x方 → 3x^2、五倍x的四次方 → 5*x^4
     s = (s.replace("×", "*").replace("÷", "/").replace("－", "-")
           .replace("－", "-").replace("＊", "*"))
@@ -332,6 +333,26 @@ _TEX_CMD = [
     (r"\ln", "log"), (r"\log", "log"), (r"\exp", "exp"),
     (r"\sin", "sin"), (r"\cos", "cos"), (r"\tan", "tan"), (r"\cot", "cot"),
 ]
+
+
+def latex_to_ascii(s: str) -> str:
+    """学生用符号条输进来的 LaTeX 片段 → SymPy 可解析的 ASCII。
+
+    只做无损的结构转换：分式/根号/上标/花括号/常用命令。
+    `\\lim`、`\\sum`、`\\int` 这类算子不是"答案表达式"，转不动就原样留下，
+    交给语义层（模型翻译）处理——宁可少一层确定性，不可误判。
+    """
+    s = _TEX_SPACE.sub("", s)
+    for _ in range(4):                       # 允许有限层嵌套
+        new = _TEX_FRAC.sub(r"((\1)/(\2))", s)
+        new = _TEX_SQRT.sub(r"sqrt(\1)", new)
+        new = _TEX_POW.sub(r"**(\1)", new)
+        if new == s:
+            break
+        s = new
+    for cmd, rep in _TEX_CMD:
+        s = s.replace(cmd, rep)
+    return s.replace("\\", "").replace("{", "").replace("}", "")
 # 汉字、中文标点、全角符号：出现就说明这句里有"话"，不是表达式
 _CJK = re.compile(r"[\u4e00-\u9fff\u3000-\u303f\uff01-\uff5e]")
 _EXPR_CHARS = re.compile(r"^[0-9A-Za-z_+\-*/()., ]+$")

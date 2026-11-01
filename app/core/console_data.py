@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from collections import deque
@@ -47,13 +48,13 @@ _LABEL_LOCK = threading.Lock()
 try:
     if _LABEL_FILE.exists():
         _LABELS = {k: v for k, v in json.loads(_LABEL_FILE.read_text(encoding="utf-8")).items()
-                   if isinstance(k, str) and isinstance(v, str)}
+                   if isinstance(k, str) and re.fullmatch(r"#[0-9A-F]{6}", v or "")}
 except Exception:
     _LABELS = {}
 
 
 def label_for_ip(ip: str) -> str:
-    """取（或分配）一个 IP 的显示标签 #xxxx。"""
+    """取（或分配）一个 IP 的显示标签 #XXXXXX（6 位大写十六进制）。"""
     import hashlib
 
     ip = (ip or "").strip() or "unknown"
@@ -61,12 +62,12 @@ def label_for_ip(ip: str) -> str:
         lab = _LABELS.get(ip)
         if lab:
             return lab
-        digest = hashlib.md5(ip.encode("utf-8")).hexdigest()
-        lab = "#" + digest[:4]
+        digest = hashlib.md5(ip.encode("utf-8")).hexdigest().upper()
+        lab = "#" + digest[:6]
         n = 0
-        while lab in _LABELS.values() and n < len(digest) - 4:
+        while lab in _LABELS.values() and n + 6 < len(digest):
             n += 1
-            lab = "#" + digest[n:n + 4]
+            lab = "#" + digest[n:n + 6]
         _LABELS[ip] = lab
         try:
             _LABEL_FILE.write_text(json.dumps(_LABELS, ensure_ascii=False, indent=1),

@@ -98,8 +98,8 @@ button.chip:hover{border-color:var(--brand)}
 
 /* ---------- 入场与快捷操作 ---------- */
 .qr-body{display:flex;gap:16px;padding:14px 16px 4px;align-items:flex-start}
-.qr-img-wrap{flex:none;width:172px;text-align:center}
-.qr-img-wrap img{width:172px;height:172px;display:block;background:#fff;
+.qr-img-wrap{flex:none;width:200px;text-align:center}
+.qr-img-wrap img{width:200px;height:200px;display:block;background:#fff;
   border:1px solid var(--line);border-radius:var(--r-md);cursor:zoom-in}
 .qr-side2{flex:1;min-width:0;display:flex;flex-direction:column;gap:11px}
 .qr-tabs{display:flex;gap:8px;flex-wrap:wrap}
@@ -128,7 +128,6 @@ button.chip:hover{border-color:var(--brand)}
 }
 .op:hover{border-color:#C9D2FA;background:#FAFBFF}
 .op:disabled{opacity:.5;cursor:default}
-.op.wide{grid-column:1/-1}
 .sw{position:relative;display:inline-flex;width:42px;height:24px;flex:0 0 auto}
 .sw input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
 .sw i{position:absolute;inset:0;background:#DDE0E6;border-radius:12px;transition:.2s;pointer-events:none}
@@ -379,14 +378,11 @@ button.chip:hover{border-color:var(--brand)}
           <button data-mode="hybrid">混合</button>
         </div>
         <div class="ops-grid">
-          <button class="op" id="tn-row">
-            <span>公网隧道</span>
-            <span class="sw"><input type="checkbox" id="tn-sw"><i></i></span></button>
           <button class="op" id="demo-row">
             <span>演示模式</span>
             <span class="sw"><input type="checkbox" id="demo-sw"><i></i></span></button>
-          <button class="op wide" id="open-settings">
-            <span>模型设置（地址 / Key / 模型名）</span>
+          <button class="op" id="open-settings">
+            <span>模型设置</span>
             <span class="tri" aria-hidden="true"></span></button>
         </div>
       </div>
@@ -621,10 +617,9 @@ function paintQR(acc){
   document.querySelectorAll('#qr-tabs button').forEach(b => {
     const k = b.dataset.qr;
     b.classList.toggle('on', k === QR_MODE);
-    // 隧道永远可点：没地址时点击定位到隧道开关；disabled 按钮不触发 click，
-    // 之前把它 disable 掉导致"没响应"
+    // 隧道永远可点：没地址时点它就是开启隧道
     b.disabled = (k !== 'tunnel') && !urls[k];
-    b.title = (k === 'tunnel' && !urls.tunnel) ? '点击定位到隧道开关' : '';
+    b.title = (k === 'tunnel' && !urls.tunnel) ? '点击开启公网隧道' : '';
   });
   const url = urls[QR_MODE] || '';
   $('#qr-url').textContent = url || '（该入口还没有地址）';
@@ -643,19 +638,16 @@ function paintQR(acc){
   $('#qr-sub').textContent = labels[QR_MODE];
 }
 
-function flash(el){
-  if(!el) return;
-  el.classList.remove('flash');
-  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('flash')));
-  setTimeout(() => el.classList.remove('flash'), 2400);
-}
-
 $('#qr-tabs').addEventListener('click', e => {
   const b = e.target.closest('button');
   if(!b || b.disabled) return;
   const k = b.dataset.qr;
   if(k === 'tunnel' && !((window.QR_URLS || {}).tunnel)){
-    flash($('#tn-row'));
+    // 隧道没开：点"隧道"就是开隧道的入口，不用再去别处找开关
+    toast('隧道开启中，最多等半分钟…');
+    api('/api/access/tunnel', {action: 'start'})
+      .then(() => loadOverview())
+      .catch(err => toast(err.message, true));
     return;
   }
   QR_MODE = k;
@@ -855,7 +847,21 @@ $('#mode-row').addEventListener('click', async e => {
   const zh = {mock:'离线题库', cloud:'云端', local:'本地', hybrid:'混合'}[mode];
   try{
     await api('/api/console/mode', {mode});
-    toast('已切换到' + zh + '方案');
+    if(mode === 'mock'){
+      toast('已切换到离线题库');
+      loadOverview();
+      return;
+    }
+    // 切上去不等于能用：没通过连通测试的方案等于没切。当场测一次，
+    // 不过就把模型设置面板拍出来
+    toast(zh + '方案 · 正在测试连通…');
+    const t = await api('/api/llm/test', {});
+    if(t.ok){
+      toast('已切换到' + zh + '方案 · 连通正常');
+    }else{
+      toast(zh + '方案未通过连通测试，请先完成配置', true);
+      openSet();
+    }
     loadOverview();
   }catch(err){
     toast('切换失败：' + err.message, true);
@@ -938,7 +944,7 @@ async function pollLogs(){
   }
 }
 
-$('#console-btn').onclick = () => window.open('/student', '_blank');
+$('#console-btn').onclick = () => window.open('/student?console=1', '_blank');
 $('#reset-code').onclick = async () => {
   const c = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
   try{
@@ -953,17 +959,6 @@ $('#demo-sw').onchange = async e => {
     toast(r.on ? '演示模式已开启' : '已解锁');
   }catch(err){ toast(err.message, true); }
   loadOverview();
-};
-$('#tn-sw').onchange = async e => {
-  const want = e.target.checked;
-  e.target.disabled = true;
-  // 反馈要在点击瞬间给：cloudflared 拉起要好些秒，等接口返回才提示就晚了
-  toast(want ? '隧道开启中，最多等半分钟…' : '隧道已关闭');
-  try{
-    await api('/api/access/tunnel', {action: want ? 'start' : 'stop'});
-  }catch(err){ toast(err.message, true); }
-  e.target.disabled = false;
-  setTimeout(loadOverview, 1200);
 };
 
 /* ---------- 模型设置弹窗（与学生端设置同一套接口和字段） ---------- */

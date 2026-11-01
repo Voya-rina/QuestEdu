@@ -199,6 +199,10 @@ textarea:focus{border-color:#BFC8F5}
   font-family:inherit;cursor:pointer;line-height:1.4;
 }
 .sym:active{background:var(--brand-soft);border-color:var(--brand)}
+.sym .katex{font-size:1em}
+.sym.gk{display:none}
+.sym-strip.greek .sym.gk{display:inline-block}
+.sym-strip.greek #sym-greek{background:var(--brand-soft);border-color:var(--brand)}
 
 .send:disabled{background:#C9CEDA}
 
@@ -614,13 +618,13 @@ input[type=range]::-webkit-slider-thumb{
         <path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>
       </svg>
     </button>
-    <button class="gear" id="qr-btn" aria-label="扫码在手机上打开">
+    <button class="gear" id="qr-btn" aria-label="扫码在手机上打开" style="display:none">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>
         <path d="M14 14h3v3h-3z"/><path d="M14 21v-1M21 14h-1M17 17h4M21 17v4M17 21h4"/>
       </svg>
     </button>
-    <button class="gear" id="gear" aria-label="设置">
+    <button class="gear" id="gear" aria-label="设置" style="display:none">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 9 4.6 1.6 1.6 0 0 0 10 3.1V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/>
       </svg>
@@ -659,16 +663,42 @@ input[type=range]::-webkit-slider-thumb{
   <footer id="footer">
     <div class="choices" id="choices"></div>
     <div class="sym-strip" id="sym-strip">
-      <button class="sym" data-s="x^2">x²</button>
-      <button class="sym" data-s="^3">^3</button>
-      <button class="sym" data-s="^{}" data-back="1">^{}</button>
-      <button class="sym" data-s="_{}" data-back="1">_{}</button>
-      <button class="sym" data-s="sqrt()" data-back="1">√()</button>
-      <button class="sym" data-s="1/2">1/2</button>
+      <button class="sym" data-s="^{}" data-back="1" data-tex="x^{\square}"></button>
+      <button class="sym" data-s="_{}" data-back="1" data-tex="x_{\square}"></button>
+      <button class="sym" data-s="\log_{}{}" data-back="3" data-tex="\log_{\square}\square"></button>
+      <button class="sym" data-s="\lim_{{}\to{}} {}" data-back="10" data-tex="\lim_{\square\to\square}\square"></button>
+      <button class="sym" data-s="\sum_{i=1}^{n}" data-tex="\sum_{i=1}^{n}"></button>
+      <button class="sym" data-s="\int_{}^{}" data-back="1" data-tex="\int_{\square}^{\square}"></button>
+      <button class="sym" data-s="sqrt()" data-back="1" data-tex="\sqrt{\square}"></button>
       <button class="sym" data-s="/">/</button>
-      <button class="sym" data-s="()" data-back="1">( )</button>
-      <button class="sym" data-s="pi">π</button>
+      <button class="sym" data-s="()" data-back="1" data-tex="(\,\square\,)"></button>
       <button class="sym" data-s="-">−</button>
+      <button class="sym" id="sym-greek" title="希腊字母">α β γ</button>
+      <button class="sym gk" data-s="α">α</button>
+      <button class="sym gk" data-s="β">β</button>
+      <button class="sym gk" data-s="γ">γ</button>
+      <button class="sym gk" data-s="δ">δ</button>
+      <button class="sym gk" data-s="ε">ε</button>
+      <button class="sym gk" data-s="θ">θ</button>
+      <button class="sym gk" data-s="λ">λ</button>
+      <button class="sym gk" data-s="μ">μ</button>
+      <button class="sym gk" data-s="ρ">ρ</button>
+      <button class="sym gk" data-s="σ">σ</button>
+      <button class="sym gk" data-s="τ">τ</button>
+      <button class="sym gk" data-s="φ">φ</button>
+      <button class="sym gk" data-s="ω">ω</button>
+      <button class="sym gk" data-s="Δ">Δ</button>
+      <button class="sym gk" data-s="Θ">Θ</button>
+      <button class="sym gk" data-s="Λ">Λ</button>
+      <button class="sym gk" data-s="Π">Π</button>
+      <button class="sym gk" data-s="Σ">Σ</button>
+      <button class="sym gk" data-s="Φ">Φ</button>
+      <button class="sym gk" data-s="Ω">Ω</button>
+      <button class="sym gk" data-s="∞" data-tex="\infty"></button>
+      <button class="sym gk" data-s="≤" data-tex="\leq"></button>
+      <button class="sym gk" data-s="≥" data-tex="\geq"></button>
+      <button class="sym gk" data-s="≠" data-tex="\neq"></button>
+      <button class="sym gk" data-s="±" data-tex="\pm"></button>
     </div>
     <div class="composer">
       <textarea id="input" rows="1" placeholder="说说你的想法…"></textarea>
@@ -1185,6 +1215,10 @@ function heartbeat(){
 function startHeartbeat(){
   heartbeat();
   setInterval(heartbeat, 25000);
+  // 手机息屏会暂停定时器：回前台立刻补一次，权限变化不用干等 25 秒
+  document.addEventListener('visibilitychange', () => {
+    if(!document.hidden) heartbeat();
+  });
 }
 
 /* ---------- 等待层的小贴士：一次只出一条，隔几秒换下一条 ---------- */
@@ -1419,18 +1453,24 @@ async function boot(){
   $('#input').addEventListener('focus', () => setTimeout(() => { fitViewport(); scrollEnd(); }, 320));
 
   initPbarDrag();
-  initQRCard();
   initDemoLock();
-  initLLM();
-  // 一对多的权限边界：设置/入口管理是控制端（跑服务的电脑）专属。
-  // 用户端连齿轮和扫码按钮都不渲染——服务端同样拦着，这里只是不给看见
+  // 一对多的权限边界：设置/入口管理是控制端专属。按钮默认不渲染——
+  // 观众手再快也点不进一个还没出现的界面。两种情况显示：
+  // 从控制台「移动端控制台」进来（URL 带 console=1），或在跑服务的电脑上打开
+  let TOOLS_READY = false;
+  const showConsoleTools = () => {
+    if(TOOLS_READY) return;
+    TOOLS_READY = true;
+    $('#gear').style.display = '';
+    $('#qr-btn').style.display = '';
+    initQRCard();
+    initLLM();
+  };
+  if(/(?:^|[?&])console=1/.test(location.search)) showConsoleTools();
   api('/api/llm').then(s => {
-    if(s && s.controller === false){
-      $('#gear').style.display = 'none';
-      $('#qr-btn').style.display = 'none';
-    }
-    startHeartbeat();
+    if(s && s.controller !== false) showConsoleTools();
   }).catch(() => {});
+  startHeartbeat();   // 心跳必须无条件跑：权限自动生效全靠它
   await refreshHome();
 }
 document.addEventListener('DOMContentLoaded', boot);
@@ -2327,7 +2367,15 @@ $('#sym-strip').addEventListener('pointerdown', e => {
   const b = e.target.closest('.sym');
   if(!b) return;
   e.preventDefault();          // 别让点按钮把输入框焦点抢走
-  insertAtCursor(input, b.dataset.s, +(b.dataset.back || 0));
+  if(b.id === 'sym-greek'){    // 希腊字母：展开/收起，不插字符
+    $('#sym-strip').classList.toggle('greek');
+    return;
+  }
+  if(b.dataset.s) insertAtCursor(input, b.dataset.s, +(b.dataset.back || 0));
+});
+// 按钮上的数学式用 KaTeX 画出来（□ 是待填的空），学生看得懂才点得准
+document.querySelectorAll('#sym-strip .sym[data-tex]').forEach(b => {
+  try{ katex.render(b.dataset.tex, b, {throwOnError:false}); }catch(err){}
 });
 
 /* 右上角刷新：重新拉题库与配置；正在做题时先确认，别一挥手就丢进度 */
