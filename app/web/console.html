@@ -115,6 +115,12 @@ button.chip:hover{border-color:var(--brand)}
 .qr-url{font-family:var(--mono);font-size:12px;word-break:break-all;color:#4A5058;
   background:#FAFBFC;border:1px solid var(--line);border-radius:var(--r-sm);padding:8px 10px}
 .qr-code-line{font-size:13px;color:var(--muted)}
+.tn-row{display:flex;gap:6px;align-items:center}
+.tn-row select{font:inherit;font-size:12px;padding:5px 6px;border:1px solid var(--line);
+  border-radius:var(--r-sm);background:#fff;color:var(--ink);max-width:150px}
+.tn-row input{flex:1;min-width:0;font:inherit;font-size:12px;padding:5px 8px;
+  border:1px solid var(--line);border-radius:var(--r-sm);outline:none}
+.tn-row input:focus{border-color:var(--brand)}
 .qr-code-line b{
   font-size:24px;letter-spacing:.22em;color:var(--brand);font-weight:700;
   font-variant-numeric:tabular-nums;cursor:pointer;margin-left:6px;
@@ -373,6 +379,15 @@ button.chip:hover{border-color:var(--brand)}
           <div class="qr-url" id="qr-url">—</div>
           <div class="qr-code-line">访问码 <b id="qr-code">····</b>
             <button class="mini-btn" id="reset-code">重置</button></div>
+          <div class="tn-row" id="tn-row" style="display:none">
+            <select id="tn-provider">
+              <option value="cloudflared">Cloudflare</option>
+              <option value="natapp">natapp</option>
+              <option value="cpolar">cpolar</option>
+            </select>
+            <input id="tn-token" type="password" autocomplete="off" placeholder="Token" style="display:none">
+            <button class="mini-btn" id="tn-save" style="display:none">√</button>
+          </div>
         </div>
       </div>
       <div class="ops">
@@ -643,7 +658,7 @@ function paintHeader(d){
   $('#qr-code').textContent = (d.gate && d.gate.code) || '····';
 }
 
-let QR_MODE = 'lan', QR_LAST = '';
+let QR_MODE = 'lan', QR_LAST = '', TUN_WAS_ON = false;
 
 function paintQR(acc){
   const urls = {
@@ -652,18 +667,22 @@ function paintQR(acc){
     tunnel: acc.tunnel_url || '',
   };
   window.QR_URLS = urls;
-  if(!urls[QR_MODE]){
-    QR_MODE = Object.keys(urls).find(k => urls[k]) || 'lan';
+  window.TN_STATE = acc.tunnel_state || '';
+  // 隧道刚拿到地址（off→on）：自动跳到隧道入口，不用人再点一下；
+  // 只在"这次轮询才开成功"时跳一次，之后想看局域网随便切回来
+  if(urls.tunnel && !TUN_WAS_ON && QR_MODE !== 'tunnel'){
+    QR_MODE = 'tunnel';
+    QR_LAST = '';
   }
+  TUN_WAS_ON = !!urls.tunnel;
   document.querySelectorAll('#qr-tabs button').forEach(b => {
-    const k = b.dataset.qr;
-    b.classList.toggle('on', k === QR_MODE);
-    // 隧道永远可点：没地址时点它就是开启隧道
-    b.disabled = (k !== 'tunnel') && !urls[k];
-    b.title = (k === 'tunnel' && !urls.tunnel) ? '点击开启公网隧道' : '';
+    // 三个页签永远可点：没地址就显示占位提示，不再把按钮灰掉
+    b.classList.toggle('on', b.dataset.qr === QR_MODE);
+    b.disabled = false;
   });
   const url = urls[QR_MODE] || '';
-  $('#qr-url').textContent = url || '（该入口还没有地址）';
+  $('#qr-url').textContent = url
+    || (QR_MODE === 'tunnel' && window.TN_STATE === 'starting' ? '隧道建立中，最多等半分钟…' : '（该入口还没有地址）');
   if(url !== QR_LAST){
     QR_LAST = url;
     const img = $('#qr-img');
@@ -677,24 +696,66 @@ function paintQR(acc){
   }
   const labels = {lan: '局域网', ipv6: 'IPv6 公网', tunnel: '公网隧道'};
   $('#qr-sub').textContent = labels[QR_MODE];
+  // 隧道方案配置行只在隧道页签出现；natapp/cpolar 需要 token 才展开输入框和确认钮
+  $('#tn-row').style.display = QR_MODE === 'tunnel' ? '' : 'none';
+  const tp = $('#tn-provider');
+  if(document.activeElement !== tp) tp.value = acc.tunnel_provider || 'cloudflared';
+  updateTnVis();
+}
+
+function updateTnVis(){
+  const domestic = $('#tn-provider').value !== 'cloudflared';
+  $('#tn-token').style.display = domestic ? '' : 'none';
+  $('#tn-save').style.display = domestic ? '' : 'none';
 }
 
 $('#qr-tabs').addEventListener('click', e => {
   const b = e.target.closest('button');
-  if(!b || b.disabled) return;
+  if(!b) return;
   const k = b.dataset.qr;
   if(k === 'tunnel' && !((window.QR_URLS || {}).tunnel)){
-    // 隧道没开：点"隧道"就是开隧道的入口，不用再去别处找开关
-    toast('隧道开启中，最多等半分钟…');
-    api('/api/access/tunnel', {action: 'start'})
-      .then(() => loadOverview())
-      .catch(err => toast(err.message, true));
+    // 隧道没开：选中它显示"建立中"，同时把隧道拉起来——
+    // 建立期间局域网/IPv6 页签照常可切，各入口互不干扰
+    QR_MODE = 'tunnel';
+    QR_LAST = '';
+    if(window.TN_STATE !== 'starting'){
+      toast('隧道开启中，最多等半分钟…');
+      api('/api/access/tunnel', {action: 'start'})
+        .then(() => loadOverview())
+        .catch(err => toast(err.message, true));
+    }
+    loadOverview();
     return;
   }
   QR_MODE = k;
   QR_LAST = '';
   loadOverview();
 });
+$('#tn-provider').addEventListener('change', async () => {
+  updateTnVis();
+  // Cloudflare 不需要凭据：选它就是切换并立即开启；natapp/cpolar 等填完 token 按 √
+  if($('#tn-provider').value !== 'cloudflared') return;
+  try{
+    await api('/api/access/tunnel', {action: 'start', provider: 'cloudflared'});
+    QR_MODE = 'tunnel';
+    QR_LAST = '';
+    loadOverview();
+  }catch(err){ toast(err.message, true); }
+});
+
+$('#tn-save').onclick = async () => {
+  const provider = $('#tn-provider').value;
+  const token = $('#tn-token').value.trim();
+  try{
+    await api('/api/access/tunnel', {action: 'start', provider, token});
+    $('#tn-token').value = '';
+    toast('隧道开启中…');
+    QR_MODE = 'tunnel';
+    QR_LAST = '';
+    loadOverview();
+  }catch(err){ toast(err.message, true); }
+};
+
 $('#qr-img').onclick = () => {
   const src = $('#qr-img').getAttribute('src');
   if(!src) return;

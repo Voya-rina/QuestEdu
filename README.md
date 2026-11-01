@@ -103,6 +103,19 @@ IPv6 的两个坑：运营商普遍封 80/443 入站，所以端口用 8062 这�
 
 隧道用的是 **quick tunnel**（`cloudflared tunnel --url`），不用登录 Cloudflare 账号，
 代价是域名随机、重启就换。要固定域名得有自己的域名 + `cloudflared tunnel create`。
+启动参数固定 `--protocol http2`：默认的 QUIC 走 UDP，校园网掐 UDP 时隧道会反复断流
+（浏览器报 Cloudflare 1033 多半就是它），强制走 TCP 稳得多。
+
+### 换国内隧道（natapp / cpolar）
+
+校园网环境下 Cloudflare 时常不稳，控制台"入场"卡里可以切换隧道方案：
+
+1. 去 [natapp.cn](https://natapp.cn) 或 [cpolar.com](https://www.cpolar.com) 注册，
+   创建一条 web 隧道指向 `127.0.0.1:8062`，拿到 authtoken
+2. 下载对应客户端，改名为 `natapp.exe` / `cpolar.exe` 放进项目根目录的 `Cloudflared\` 文件夹
+3. 控制台选方案、填 Token、点"保存并开启"（token 存在 `.access.json`，已 gitignore）
+
+注意 natapp 免费版限速且域名随机；答辩要固定域名得买最低档隧道。
 
 ### 发布到 WorkBuddy 托管
 

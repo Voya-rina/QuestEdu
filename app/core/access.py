@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -26,7 +27,9 @@ import time
 from collections import deque
 from urllib.parse import parse_qs, urlparse
 
-from app.config import ROOT, lan_ip
+from app.config import ROOT, WEB_DIR, lan_ip
+
+log = logging.getLogger(__name__)
 
 CONFIG_PATH = ROOT / ".access.json"      # 已加进 .gitignore，和 .env 同级
 COOKIE = "qe_pass"
@@ -39,8 +42,36 @@ _LAN_WHITELIST = {
 }
 
 _TUNNEL_URL = re.compile(r"https://[a-z0-9][a-z0-9-]*\.trycloudflare\.com")
+# natapp / cpolar 的免费域名都带自家关键字，按关键字认——比穷举 TLD 稳
+_TUNNEL_URL_NATAPP = re.compile(r"https://[a-z0-9-]+\.[a-z0-9.-]*natapp[a-z0-9-]*\.[a-z]{2,}")
+_TUNNEL_URL_CPOLAR = re.compile(r"https://[a-z0-9-]+\.[a-z0-9.-]*cpolar[a-z0-9-]*\.[a-z]{2,}")
 _TUNNEL_FAIL = re.compile(r"(failed to request quick Tunnel|failed to authenticate|"
-                          r"context canceled|no such host|TLS handshake)", re.I)
+                          r"context canceled|no such host|TLS handshake|"
+                          r"Authtoken|认证失败|登录失败|隧道不)", re.I)
+
+_TUNNEL_PROVIDERS = ("cloudflared", "natapp", "cpolar")
+
+
+def tunnel_config() -> tuple[str, str]:
+    """当前隧道方案（cloudflared / natapp / cpolar）与其 authtoken。"""
+    d = _read()
+    p = str(d.get("tn_provider") or "cloudflared")
+    if p not in _TUNNEL_PROVIDERS:
+        p = "cloudflared"
+    return p, str(d.get("tn_token") or "")
+
+
+def set_tunnel_config(provider: str, token: str | None = None) -> tuple[str, str]:
+    """保存隧道方案。token 传 None / 空串＝沿用已保存的（密码框惯例）。"""
+    provider = (provider or "").strip().lower()
+    if provider not in _TUNNEL_PROVIDERS:
+        raise AccessError("隧道方案只支持 cloudflared / natapp / cpolar")
+    d = _read()
+    d["tn_provider"] = provider
+    if token:
+        d["tn_token"] = str(token).strip()
+    _write(d)
+    return tunnel_config()
 
 
 class AccessError(RuntimeError):
@@ -336,11 +367,45 @@ def find_cloudflared() -> str:
     return found or ""
 
 
-class Tunnel:
-    """一条 cloudflared quick tunnel 的生命周期。
+def find_tunnel_bin(provider: str) -> str:
+    r"""找指定方案的可执行文件。natapp / cpolar 和 cloudflared 同一套搜索路径，
+    放进项目根目录的 Cloudflared\ 文件夹（或 PATH）即可。"""
+    if provider == "cloudflared":
+        return find_cloudflared()
+    env = os.environ.get("TUNNEL_BIN") or ""
+    if env and os.path.isfile(env):
+        return env
+    names = (f"{provider}.exe", f"{provider}-windows-amd64.exe")
+    candidates: list[str] = []
+    for base in (ROOT / "Cloudflared", ROOT / "Tunnel", ROOT.parent / "Cloudflared"):
+        for name in names:
+            candidates.append(str(base / name))
+    candidates += [fr"E:\AI\cloudflared\{name}" for name in names]
+    candidates += [fr"C:\Program Files\{name}" for name in names]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return shutil.which(provider) or ""
 
-    quick tunnel（`--url` 模式）不需要登录 Cloudflare 账号，代价是每次重启
-    都换一个 `*.trycloudflare.com` 域名，而且完全公开——所以必须有访问码。
+
+_BIN_MISSING = {
+    "cloudflared": "没找到 cloudflared。把它放到项目根目录的 Cloudflared\\ 下"
+                   "（cloudflared.exe 或 cloudflared-windows-amd64.exe），重启服务即可",
+    "natapp": "没找到 natapp。去 natapp.cn 下载客户端，改名 natapp.exe 放进项目根目录的"
+              " Cloudflared\\ 文件夹；并在官网创建 web 隧道（指向 127.0.0.1:本服务端口）拿 authtoken",
+    "cpolar": "没找到 cpolar。去 cpolar.com 下载 Windows 客户端，把 cpolar.exe 放进项目根目录的"
+              " Cloudflared\\ 文件夹，并在官网拿到 authtoken",
+}
+
+
+class Tunnel:
+    """一条公网隧道的生命周期，支持三个方案：
+
+    - cloudflared quick tunnel：免登录，代价是每次重启换域名、且对网络环境挑剔
+      （默认走 QUIC/UDP，校园网掐 UDP 就频繁断流——所以固定 `--protocol http2`
+      强制走 TCP，实测在掐 UDP 的网络里稳得多）
+    - natapp：国内节点，低延迟；需要官网注册 + authtoken，本地端口在官网配
+    - cpolar：同上，authtoken 首次写入它的配置，之后直接起
     """
 
     def __init__(self):
@@ -348,43 +413,66 @@ class Tunnel:
         self.url = ""
         self.state = "off"          # off | starting | on | error
         self.message = ""
+        self.provider = "cloudflared"
         self._lock = threading.Lock()
-        self._log: deque = deque(maxlen=80)   # cloudflared 的输出尾部，排错用
+        self._log: deque = deque(maxlen=80)   # 隧道进程的输出尾部，排错用
 
     # -- 状态 ------------------------------------------------------------
     def snapshot(self) -> dict:
         alive = self.proc is not None and self.proc.poll() is None
         if self.state in ("on", "starting") and not alive:
             self.state = "error"
-            self.message = self.message or "cloudflared 已退出"
+            self.message = self.message or "隧道进程已退出"
+        provider, token = tunnel_config()
         return {
             "state": self.state,
             "url": self.url if self.state == "on" else "",
             "message": self.message,
-            "binary": find_cloudflared(),
+            "binary": find_tunnel_bin(provider),
+            "provider": provider,
+            "has_token": bool(token) or provider == "cloudflared",
         }
 
     # -- 启动 ------------------------------------------------------------
     def start(self, port: int, wait: float = 30.0) -> dict:
+        provider, token = tunnel_config()
+        self.provider = provider
         with self._lock:
             if self.proc is not None and self.proc.poll() is None:
                 if self.state in ("starting", "on"):
                     return self.snapshot()      # 已经在起/已起，别再起一个
                 self.stop()
 
-            exe = find_cloudflared()
+            exe = find_tunnel_bin(provider)
             if not exe:
-                self.state, self.message = "error", (
-                    "没找到 cloudflared。把它放到项目根目录的 Cloudflared\\ 下"
-                    "（cloudflared.exe 或 cloudflared-windows-amd64.exe），重启服务即可")
+                self.state, self.message = "error", _BIN_MISSING[provider]
                 return self.snapshot()
+            if provider in ("natapp", "cpolar") and not token:
+                self.state, self.message = "error", (
+                    f"{provider} 需要 authtoken：在官网注册后创建隧道（指向 "
+                    f"127.0.0.1:{port}），把 token 填进控制台的 Token 框")
+                return self.snapshot()
+
+            if provider == "natapp":
+                # natapp 的本地端口在官网隧道配置里填，命令行只给 token；
+                # 日志走 stderr，已被 STDERR=STDOUT 合并捕获，不用加 log 参数
+                cmd = [exe, f"-authtoken={token}"]
+            elif provider == "cpolar":
+                # authtoken 先写进它的配置文件（一条快命令），再起隧道
+                try:
+                    subprocess.run([exe, "authtoken", token],
+                                   capture_output=True, timeout=15,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                except Exception:
+                    pass                    # 写失败不拦路：它可能已经配过了
+                cmd = [exe, "http", str(port)]
+            else:
+                cmd = [exe, "tunnel", "--url", f"http://127.0.0.1:{port}",
+                       "--no-autoupdate", "--metrics", "127.0.0.1:0",
+                       "--protocol", "http2"]
 
             self.state, self.url, self.message = "starting", "", ""
             self._log.clear()
-            # metrics 端口必须随机：默认 20242，两个实例同时跑第二个会因
-            # 端口冲突直接退出（踩过：残留进程 + 新实例 = 一直"已退出"）
-            cmd = [exe, "tunnel", "--url", f"http://127.0.0.1:{port}",
-                   "--no-autoupdate", "--metrics", "127.0.0.1:0"]
             flags = 0
             if os.name == "nt":
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -412,17 +500,20 @@ class Tunnel:
                 self.message = "还没拿到域名，再等几秒；不行就关掉开关重开"
             else:
                 self.state = "error"
-                self.message = self.message or "cloudflared 启动后退出了"
+                self.message = self.message or "隧道进程启动后退出了"
         return self.snapshot()
 
     def _pump(self, proc: subprocess.Popen) -> None:
-        """读 cloudflared 的输出，捞出公网地址；尾部留存用于排错。"""
+        """读隧道进程的输出，捞出公网地址；尾部留存用于排错。"""
+        pat = {"cloudflared": _TUNNEL_URL,
+               "natapp": _TUNNEL_URL_NATAPP,
+               "cpolar": _TUNNEL_URL_CPOLAR}[self.provider]
         try:
             for line in proc.stdout or []:
                 line = line.rstrip()
                 if line:
                     self._log.append(line)
-                m = _TUNNEL_URL.search(line)
+                m = pat.search(line)
                 if m and self.state != "on":
                     self.url = m.group(0)
                     self.state = "on"
@@ -435,7 +526,7 @@ class Tunnel:
             pass
         if self.state == "starting" and proc.poll() is not None:
             self.state = "error"
-            self.message = self.message or "cloudflared 启动后立刻退出了"
+            self.message = self.message or "隧道进程启动后立刻退出了"
             tail = " | ".join(list(self._log)[-2:])
             if tail:
                 self.message += "：" + tail[:220]
@@ -568,7 +659,9 @@ class AccessGate:
             return await self.app(scope, receive, send)
 
         client = (scope.get("client") or ("?", 0))[0]
-        from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+        from starlette.responses import FileResponse, HTMLResponse, JSONResponse
+
+        log.info("闸门拦截 %s %s（来自 %s）", scope.get("method", "GET"), path, client)
 
         if path == "/__gate":
             if scope.get("method", "GET").upper() == "POST":
@@ -586,11 +679,17 @@ class AccessGate:
                                               status_code=429)(scope, receive, send)
                 got = (parse_qs(body.decode("utf-8", "replace")).get("code") or [""])[0].strip()
                 if got and got == code():
-                    resp = RedirectResponse("/", status_code=303)
+                    # 不做 303 跳转：部分手机 webview 会带着 POST 方法跟 30x，
+                    # 落在 GET 路由上就是一坨 {"detail":...} JSON；而且每次跳转
+                    # 都要多走一遍公网隧道。直接把学生页和 cookie 一起回掉。
+                    log.info("闸门：访问码正确（%s），直接返回主界面", client)
+                    resp = FileResponse(WEB_DIR / "index.html",
+                                        media_type="text/html; charset=utf-8")
                     resp.set_cookie(COOKIE, cookie_value(), max_age=30 * 86400,
                                     httponly=True, samesite="lax")
                     return await resp(scope, receive, send)
                 note_try(client)
+                log.warning("闸门：访问码错误（%s）", client)
                 return await HTMLResponse(gate_page("访问码不对"), status_code=401)(scope, receive, send)
             return await HTMLResponse(gate_page())(scope, receive, send)
 

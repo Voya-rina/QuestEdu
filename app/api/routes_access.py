@@ -56,7 +56,11 @@ def status(request: Request):
 
 @router.post("/tunnel")
 async def tunnel_switch(request: Request):
-    """启动 / 停止 Cloudflare 隧道。body: {"action": "start"|"stop"}"""
+    """启动 / 停止公网隧道。body: {"action": "start"|"stop", "provider": "...", "token": "..."}
+
+    provider：cloudflared（默认）/ natapp / cpolar；带 provider 就先存进配置。
+    token：natapp / cpolar 的 authtoken；空串或省略＝沿用已保存的。
+    """
     body = {}
     try:
         body = await request.json()
@@ -67,6 +71,14 @@ async def tunnel_switch(request: Request):
 
     if action == "stop":
         return access.tunnel.stop()
+    provider = str((body or {}).get("provider") or "").strip()
+    token = str((body or {}).get("token") or "").strip()
+    if provider or token:
+        try:
+            access.set_tunnel_config(provider or access.tunnel_config()[0],
+                                     token or None)
+        except access.AccessError as e:
+            raise HTTPException(400, str(e))
     try:
         return access.tunnel.start(_port(request))
     except access.AccessError as e:

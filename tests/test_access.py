@@ -149,9 +149,11 @@ class TestGate(AccessCase):
         self.assertEqual(r.status_code, 401)
 
     def test_right_code_sets_cookie_and_opens(self):
+        # 正确的码：不跳转，学生页和 cookie 直接一起回来
         r = self.client.post("/__gate", data={"code": self.code},
                              headers=self._h("abc.trycloudflare.com"), follow_redirects=False)
-        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("QuestEdu", r.text)
         self.assertIn(access.COOKIE, r.cookies)
         # 带上 cookie 再看，应该放行
         r2 = self.client.get("/api/health", headers=self._h("abc.trycloudflare.com"))

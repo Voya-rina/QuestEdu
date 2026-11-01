@@ -75,11 +75,15 @@ def overview(request: Request):
             "url": f"http://{ips[0]}:{port}" if ips else "",
         },
         # 二维码展示卡的数据源：三种入口的地址（QR 由前端拿 /api/qr 现编）
+        # 隧道方案与 token 状态：配置弹层用；token 本身永不下发
         "access": {
             "lan_candidates": acc["lan"]["candidates"],
             "ipv6_url": acc["ipv6"]["url"],
             "tunnel_url": (acc["tunnel"].get("url") or ""
                            if acc["tunnel"].get("state") == "on" else ""),
+            "tunnel_state": acc["tunnel"].get("state") or "",
+            "tunnel_provider": acc["tunnel"].get("provider") or "cloudflared",
+            "tunnel_has_token": bool(acc["tunnel"].get("has_token")),
         },
         "devices": console_data.all_devices(),
         "known_devices": console_data.known(),
