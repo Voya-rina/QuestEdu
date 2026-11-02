@@ -134,61 +134,26 @@ def demo_plan(prob: dict) -> dict:
 PLAN_SYSTEM = """你是数学助教，把一道题拆成学生逐步作答的小问题。只输出 JSON，不要解释：
 {"题型":"","知识点":[""],"难度":"","节点":[{"问":"","答":"","式":""}]}
 
-每个节点的规则：
-1. 「问」：一小步的具体**疑问句**——句子里要有疑问词（多少 / 几 / 什么 / 哪一项），
-   以？结尾，答案是一个数、一个简短结果或一个方法名。
-   - 从"把具体值代进去看看"这类最基础的一步开始，先观察、再定方法、最后算结果
-   - **一步只问一件事**：禁止一句话塞两个问题（"A 是什么，B 是什么？"）。
-     需要两个信息就拆成两步；或者由题面固定其一，只问另一个
-     （错误示例："选 u 是什么，选 dv 是什么？"；
-      正确做法："令 u=x，那么 v=∫e^x dx 等于多少？"）
-   - **不许把答案喂到嘴边**：问句里可以铺垫背景，但不能直接给出决定性的
-     中间结果再问"剩下什么"（错误示例："展开到二阶是 1+x+x^2/2，那么分子
-     约掉后剩下什么？"——展开式就是答案的一半）
-   - **节点之间不许重复**：每个节点问不同的东西、有不同的答案；
-     "特征值是几"和"两个特征值分别是多少"是同一个问题
-   - 问句里的记号必须是学生**能打出来**的：别让学生输入 λ、∫ 这类符号——
-     问"特征值"就问"λ 等于几"并让它答数字，行列式展开这类带 λ 的中间式
-     不要当答案（「式」留空、靠下一问收数字）
-   - 禁止指令式陈述："写出…""计算…""解出…"——改成"…是多少？"
-   - 禁止让学生默写完整公式（如"写出 e^x 的泰勒展开式"）——改问其中的具体量：第几阶、系数是多少、剩哪一项
-   - 禁止流程反问："你想…吗""准备好了吗""然后呢""那你觉得呢"
-2. 「答」：期望要点，要能被学生**一口气说出来**——一个名词、一个数或一个式子；
-   禁止 "A=…，B=…" 这种逗号并列的形式（没法作答，也没法判定）。
-3. 「式」：「答」的 SymPy 形式：纯 ASCII（1/2、-16、sqrt(2)/2、exp(2)、3*x^2-3）；
-   答案不是数值（方法名、名词）就写 ""。
+规则简版（细节照示例学）：
+- 「问」：一步只问一件事的具体疑问句（…是多少/几/什么？），记号要学生打得出；
+  禁止流程反问（"然后呢""明白了吗"）、指令式（"写出…"）、把答案喂到嘴边、节点间重复
+- 「答」：一口气说得完的一个数 / 式子 / 名词；「式」是它的 SymPy 形式（纯 ASCII，
+  如 1/2、sqrt(2)/2、E-E**3），非数值写 ""
+- 节点 = 标准解法的必要步骤：先在心里完整解一遍，按解题顺序原样拆开；
+  禁止对解题没帮助的代数变形（如隐函数求导里合并对数——逐项直接求导才是正路）
+- **最后一个节点必须问出题目最终要求的那个量，它答完题目就结束**；
+  求出最终答案之后禁止再追加任何节点（方法总结、思路回顾、变形探讨都不要）
 
-**教学路径规则（比格式更重要，违反即整份计划作废）：**
-4. **先在心里完整解一遍，再拆步骤**：先确定这道题从题面到最终答案的**标准解法**，
-   把标准解法的每个必要步骤按依赖顺序变成节点。
-   自检：把任何一个节点删掉，解题是否照样顺畅？删掉没影响的节点必须删除。
-5. **禁止对解题没有帮助的代数变形**：每一步必须让目标量更近，否则一律不要。
-   典型反面教材：隐函数求导题把 ln(x+1)+ln y 合并成 ln[(x+1)y]——合并后
-   (x+1)y 求导照样要乘积法则，绕一步还更难算。含未知函数 y 的方程**逐项直接
-   对 x 求导**，禁止先"化简方程"；对数合并、通分、拆项这类展示型变形
-   不允许出现在任何节点的问句里。
-6. **求导 / 积分类题逐项拆**：乘积项、复合项（含 y 的项）各占一步，
-   每步明确考察对应法则——乘积 (uv)'=u'v+uv'、复合 (ln y)'=y'/y——
-   让学生答"这一项的导数是谁"，而不是替学生把整个方程求导完。
-   涉及具体数值的步骤（如代 x=0 求 y）放在第一步或解出导数之后，按题目自然顺序。
-
-节点数不超过 __BUDGET__ 个（按第 4 条自检删完后通常剩 3~5 个）。
-
-示例一（lim(x→0) (e^x-1-x)/x^2）：
-{"题型":"极限计算","知识点":["泰勒展开"],"难度":"中等","节点":[
-{"问":"先别急着算。把 x=0 代进分子和分母，它们各自变成几？","答":"分子分母都是 0","式":"0"},
-{"问":"这种分子分母同时为 0 的极限形式叫什么？","答":"0/0 型未定式","式":""},
-{"问":"分母是 x^2，分子用泰勒展开要展到第几阶？","答":"2 阶","式":"2"},
-{"问":"代回分子化简后约掉 x^2，极限等于多少？","答":"1/2","式":"1/2"}]}
-
-示例二（∫[0,1] x·e^x dx）：
+示例一（∫[0,1] x·e^x dx）：
 {"题型":"定积分计算","知识点":["分部积分法"],"难度":"中等","节点":[
 {"问":"被积函数是两种不同类型函数的乘积，这种积分用哪个方法？","答":"分部积分","式":""},
 {"问":"令 u=x，那么 v=∫e^x dx 等于多少？","答":"e^x","式":"exp(x)"},
 {"问":"代回分部积分公式，原函数是 x*e^x-e^x。代入上下限，结果是几？","答":"1","式":"1"}]}
 
-示例三（xy²−ln(x+1)+ln y=1，y=y(x)，求 x=0 处的 dy/dx）——**先逐项求导、
-解出 y'，最后才代数值**；不做任何对数合并之类的方程变形：
+示例二（xy²−ln(x+1)+ln y=1，y=y(x)，求 x=0 处的 dy/dx）——这是标准拆法，
+照这个样子和顺序拆：**逐项直接对 x 求导（含 y 的项求导后尾巴带 y'）→ 解出 y' →
+代数值 → 求出 dy/dx 即到最后一节点，后面没有任何节点**；全程不做对数合并、
+通分之类的方程变形：
 {"题型":"隐函数求导","知识点":["链式法则","乘积法则"],"难度":"中等","节点":[
 {"问":"xy² 这个乘积对 x 的导数是谁？","答":"y²+2xyy'","式":""},
 {"问":"方程两边同时关于自变量 x 求导（y 是 y(x)）后，等式变形为什么？","答":"y²+2xyy'-1/(x+1)+y'/y=0","式":""},
@@ -211,8 +176,8 @@ def _unescape(s: str) -> str:
 
 
 def _plan_budget() -> int:
-    """节点数上限：本地模型慢，少拆几步；云端可以细一点。"""
-    return 3 if llm.mode() == "local" else 6
+    """节点数上限已取消：拆题步数交给模型按标准解法定，不再按模式设上限。"""
+    return 10**9
 
 
 # 流程性反问 / 开场白：学生没法回答，出现即说明节点是废的。
@@ -324,8 +289,8 @@ def _build_nodes(raw_nodes: list, meta: dict, budget: int) -> list[dict]:
 
 def cloud_plan(problem: str, cancel=None) -> dict:
     budget = _plan_budget()
-    system = PLAN_SYSTEM.replace("__BUDGET__", str(budget))
-    user = f"题目：\n{problem}\n\n节点数不超过 {budget} 个。"
+    system = PLAN_SYSTEM
+    user = f"题目：\n{problem}"
 
     data = raw_nodes = None
     meta = {"题型": "", "知识点": [], "难度": ""}
@@ -721,9 +686,8 @@ class Engine:
     @staticmethod
     def make_variant(sess: Session) -> dict:
         prob = get_problem(sess.problem_id)
-        v = prob["variant"]
-        problem, expr = v["latex"], v["表达式"]
-        ask = v.get("ask") or "直接给出结果"
+        problem, expr = _variant_fallback(sess, prob)
+        ask = prob["variant"].get("ask") or "直接给出结果"
         if llm.online() and sess.mode != "mock":
             try:
                 problem, expr = cloud_variant(sess)
@@ -742,10 +706,9 @@ class Engine:
                 expr = f"limit({expr}, x, 0)"
                 answer = lv
         if answer is None and llm.online() and sess.mode != "mock":
-            # 双保险：模型给的题/表达式求不出值，整体退回内置变式题。
+            # 双保险：模型给的题/表达式求不出值，整体退回兜底变式题。
             # 标准答案显示成 "?" 等于告诉学生这产品连自己都算不明白
-            v0 = prob["variant"]
-            problem, expr = v0["latex"], v0["表达式"]
+            problem, expr = _variant_fallback(sess, prob)
             answer = mathcheck.evaluate(expr)
         sess.variant = {
             "problem": problem,
@@ -920,6 +883,30 @@ class Engine:
         }
 
 
+def _limit_marker(t: str) -> bool:
+    """题面是不是极限题——变式题同型关卡用的判定标记。"""
+    t = (t or "").lower()
+    return "lim" in t or "极限" in t
+
+
+def _variant_fallback(sess: Session, prob: dict) -> tuple[str, str]:
+    """变式兜底：题库题用自带变式；**自定义题绝不跨题型**——
+
+    get_problem() 对自定义题会兜到题库第一题（等价无穷小，极限题），直接拿来
+    当求导题的变式等于当场露馅。改用计划最后一节点：让学生独立把收尾那一步
+    再算一遍，标准答案就是该节点的数值答案——同型、可验证。
+    """
+    if prob.get("id") == sess.problem_id and "variant" in prob:
+        v = prob["variant"]
+        return v["latex"], v["表达式"]
+    for n in reversed(sess.plan.get("nodes") or []):
+        if n.get("numeric"):
+            return (f"（独立重算）把原题的最后一步再独立算一遍：{n['question']}",
+                    n["numeric"])
+    v = prob["variant"]          # 计划里连一个数值节点都没有：沿用旧行为
+    return v["latex"], v["表达式"]
+
+
 def cloud_variant(sess: Session) -> tuple[str, str]:
     """让 LLM 出同型题，并给出可用于 SymPy 验证的**最终答案**表达式。
 
@@ -933,13 +920,18 @@ def cloud_variant(sess: Session) -> tuple[str, str]:
     这产品连自己都算不明白，宁可题面保守一点。
     """
     system = (
-        "基于原题出一道同型变式题：换数字或换结构，题型、考点、难度都不变。"
+        "基于原题出一道同型变式题：换数字或换结构。题型、考点、求解目标、难度"
+        "都必须与原题完全一致——**原题求什么，变式就求什么**（原题求 y'(0) "
+        "就还求 y'(0)，原题求极限就还求极限）。禁止跨题型：原题是求导 / "
+        "隐函数求导，绝不允许出成极限、积分题。"
         "只输出 JSON，不要代码块、不要解释：\n"
         '{"题目":"题面，公式用 $...$ 包住","sympy表达式":"这道题最终答案的 SymPy 表达式"}\n'
         "「题目」必须是一条完整的中文题面，含具体数字，照原题的样子写。\n"
         "「sympy表达式」硬要求（程序会直接执行它算标准答案，所以必须就是**答案本身**）：\n"
         "- 求导题：写导函数。例：x^3 的导数 → 3*x**2；|x|^4 的导数 → 4*x**3；"
         "|x|^5 的导数 → 5*x**4*sign(x)（用 sign(x)，别用 sign(Abs(x))）\n"
+        "- 隐函数求导题（给具体点的导数值）：写那个数值。"
+        "例：xy^2-ln(x+1)+ln y=2 求 y'(0) → exp(2)-exp(6)\n"
         "- 极限题：只写极限号里的式子，程序自己会求 x→0 的极限。"
         "例：(exp(2*x)-1-2*x)/x**2\n"
         "- 定积分/方程等其他题：写求值结果，可用 integrate(...)、solve(...)\n"
@@ -949,22 +941,38 @@ def cloud_variant(sess: Session) -> tuple[str, str]:
         '"sympy表达式":"(exp(2*x)-1-2*x)/x**2"}\n'
         "示例二（原题是求 f(x)=|x|^3 的导数时）：\n"
         '{"题目":"求函数 $f(x)=\\\\left|x\\\\right|^{5}$ 的导数",'
-        '"sympy表达式":"5*x**4*sign(x)"}'
+        '"sympy表达式":"5*x**4*sign(x)"}\n'
+        "示例三（原题是 xy^2-ln(x+1)+ln y=1 求 y'(0) 时——还是隐函数求导，"
+        "只是把右边的 1 换成 2）：\n"
+        '{"题目":"已知 $xy^{2}-\\\\ln(x+1)+\\\\ln y=2$（$y=y(x)$），'
+        '求 $\\\\left.\\\\frac{dy}{dx}\\\\right|_{x=0}$",'
+        '"sympy表达式":"exp(2)-exp(6)"}'
     )
     user = (
         f"原题：{sess.problem}\n知识点：{sess.plan.get('知识点')}\n"
-        "出一道换数字/换结构的同型题，别改题型。"
+        "出一道换数字/换结构的同型题：题型、考点、求解目标照原题，别改题型。"
     )
-    data = llm.chat_json(system, user)
-    fallback = get_problem(sess.problem_id)["variant"]
-    problem = (data.get("题目") or "").strip()
-    expr = _clean_variant_expr(data.get("sympy表达式") or "")
-    # 小模型会把提示词里的占位符原样抄回来（实测输出过字面的"LaTeX题目"），
-    # 题面不像人话就整体回退内置变式题
-    if (_PLACEHOLDER.search(problem) or len(problem) < 12
-            or not expr or mathcheck.evaluate(expr) is None):
-        return fallback["latex"], fallback["表达式"]
-    return problem, expr
+    fallback_prob = get_problem(sess.problem_id)
+    extra = ""
+    for attempt in range(2):
+        data = llm.chat_json(system, user + extra)
+        problem = (data.get("题目") or "").strip()
+        expr = _clean_variant_expr(data.get("sympy表达式") or "")
+        # 小模型会把提示词里的占位符原样抄回来（实测输出过字面的"LaTeX题目"），
+        # 题面不像人话就整体回退内置变式题
+        if (_PLACEHOLDER.search(problem) or len(problem) < 12
+                or not expr or mathcheck.evaluate(expr) is None):
+            return _variant_fallback(sess, fallback_prob)
+        # 同型关卡：原题不是极限题，变式却出成极限（或反过来）——
+        # 实测隐函数求导题被出成极限变式。给一次带反馈的重修机会
+        if _limit_marker(problem) != _limit_marker(sess.problem):
+            if attempt == 0:
+                extra = ("\n\n你上一道跑题型了：变式题的题型和求解目标必须与原题"
+                         "完全一致，原题不是极限题就不要出极限题。重新输出。")
+                continue
+            return _variant_fallback(sess, fallback_prob)
+        return problem, expr
+    return _variant_fallback(sess, fallback_prob)
 
 
 # 小模型会把提示词里的占位符原样抄回来当题面（实测输出过字面的"LaTeX题目"）

@@ -361,10 +361,11 @@ class TestCloudPlan(EngineCase):
         p = self._plan({"节点计划": [{"教学意图": "让学生求导", "知识点": "求导"}]})
         self.assertIn("求导", p["nodes"][0]["question"])
 
-    def test_local_budget_is_smaller(self):
+    def test_no_node_budget_truncation(self):
+        """节点数上限已取消：模型拆出几个节点就保留几个，不再按模式截断。"""
         payload = {"节点计划": [{"提问": f"第 {i} 问？"} for i in range(1, 9)]}
-        self.assertEqual(len(self._plan(payload, mode="local")["nodes"]), 3)
-        self.assertEqual(len(self._plan(payload, mode="cloud")["nodes"]), 6)
+        self.assertEqual(len(self._plan(payload, mode="local")["nodes"]), 8)
+        self.assertEqual(len(self._plan(payload, mode="cloud")["nodes"]), 8)
 
     def test_clean_ask_handles_prefixes(self):
         for raw in ("这一步要让学生想清楚什么", "引导学生求导", "要求学生算出斜率"):
