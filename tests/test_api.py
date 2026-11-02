@@ -10,6 +10,7 @@ import unittest
 
 from fastapi.testclient import TestClient
 
+from app.data.problems import PROBLEMS
 from app.main import app
 from tests.support import force_mock, release_mock
 
@@ -50,7 +51,7 @@ class TestMeta(APICase):
         r = client.get("/api/info")
         self.assertEqual(r.status_code, 200)
         data = r.json()
-        self.assertEqual(len(data["problems"]), 7)
+        self.assertEqual(len(data["problems"]), len(PROBLEMS))
         self.assertIn("llm", data)
         self.assertNotIn("_answer", str(data))
 

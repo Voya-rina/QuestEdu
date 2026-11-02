@@ -114,6 +114,14 @@ button.chip:hover{border-color:var(--brand)}
 .qr-tabs button:disabled{opacity:.45;cursor:default}
 .qr-url{font-family:var(--mono);font-size:12px;word-break:break-all;color:#4A5058;
   background:#FAFBFC;border:1px solid var(--line);border-radius:var(--r-sm);padding:8px 10px}
+.lan-pick{position:relative}
+.lan-menu{position:absolute;top:calc(100% + 6px);left:0;z-index:30;background:#fff;
+  border:1px solid var(--line);border-radius:var(--r-md);box-shadow:0 8px 24px rgba(15,23,41,.14);
+  padding:6px;display:flex;flex-direction:column;gap:3px;min-width:270px}
+.lan-menu button{text-align:left;font-family:var(--mono);font-size:12.5px;padding:7px 10px;
+  border:0;background:transparent;border-radius:var(--r-sm);cursor:pointer;color:var(--ink)}
+.lan-menu button:hover{background:#F2F3F6}
+.lan-menu button.on{background:var(--brand-soft);color:var(--brand);font-weight:600}
 .qr-code-line{font-size:13px;color:var(--muted)}
 .tn-row{display:flex;gap:6px;align-items:center}
 .tn-row select{font:inherit;font-size:12px;padding:5px 6px;border:1px solid var(--line);
@@ -171,7 +179,6 @@ button.chip:hover{border-color:var(--brand)}
 /* 最近会话：单行 "#xxxx - 题目 - 多久前"，超长省略 */
 .sess-line{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px}
 .sess-line .ago{color:var(--muted);font-size:11.5px}
-.sess-line .sid{color:var(--muted);font-family:var(--mono);font-size:11.5px}
 .perm-btn{
   flex:none;padding:3px 10px;border-radius:12px;font-size:11.5px;font-family:inherit;
   border:1px solid var(--line);background:#F2F3F6;color:#5C626B;cursor:pointer;
@@ -377,6 +384,10 @@ button.chip:hover{border-color:var(--brand)}
             <button data-qr="tunnel">隧道</button>
           </div>
           <div class="qr-url" id="qr-url">—</div>
+          <div class="lan-pick" id="lan-pick" style="display:none">
+            <button class="mini-btn" id="lan-btn">其他 IPv4 地址 ▾</button>
+            <div class="lan-menu" id="lan-menu" style="display:none"></div>
+          </div>
           <div class="qr-code-line">访问码 <b id="qr-code">····</b>
             <button class="mini-btn" id="reset-code">重置</button></div>
           <div class="tn-row" id="tn-row" style="display:none">
@@ -604,6 +615,15 @@ function esc(s){
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+/* LLM 出的题型/题目常带 **加粗** 这类 markdown 记号，一行列表里按原文显示很难看，剥掉记号只留内容 */
+function plainMD(s){
+  return String(s ?? '')
+    .replace(/\*\*([^*]*)\*\*/g, '$1')
+    .replace(/\*([^*]*)\*/g, '$1')
+    .replace(/__([^_]*)__/g, '$1')
+    .replace(/`([^`]*)`/g, '$1');
+}
+
 /* 会话监控里的公式渲染：助教说的话带 LaTeX，不渲染就是一串反斜杠 */
 const TEX_OPTS = {
   delimiters:[
@@ -658,11 +678,14 @@ function paintHeader(d){
   $('#qr-code').textContent = (d.gate && d.gate.code) || '····';
 }
 
-let QR_MODE = 'lan', QR_LAST = '', TUN_WAS_ON = false;
+let QR_MODE = 'lan', QR_LAST = '', TUN_WAS_ON = false, QR_LAN = '', QR_ACC = null;
 
 function paintQR(acc){
+  QR_ACC = acc;
+  const cands = acc.lan_candidates || [];
+  if(QR_LAN && !cands.includes(QR_LAN)) QR_LAN = '';   // 选中的网卡地址没新鲜度了就退回
   const urls = {
-    lan: (acc.lan_candidates || [])[0] || '',
+    lan: QR_LAN || cands[0] || '',
     ipv6: acc.ipv6_url || '',
     tunnel: acc.tunnel_url || '',
   };
@@ -696,6 +719,13 @@ function paintQR(acc){
   }
   const labels = {lan: '局域网', ipv6: 'IPv6 公网', tunnel: '公网隧道'};
   $('#qr-sub').textContent = labels[QR_MODE];
+  // 多网卡时给出地址切换；选中变化后二维码立即重编
+  $('#lan-pick').style.display = (QR_MODE === 'lan' && cands.length > 1) ? '' : 'none';
+  if(QR_MODE === 'lan' && cands.length > 1){
+    const cur = urls.lan;
+    $('#lan-menu').innerHTML = cands.map(c =>
+      `<button class="${c === cur ? 'on' : ''}" data-u="${esc(c)}">${esc(c)}</button>`).join('');
+  }
   // 隧道方案配置行只在隧道页签出现；natapp/cpolar 需要 token 才展开输入框和确认钮
   $('#tn-row').style.display = QR_MODE === 'tunnel' ? '' : 'none';
   const tp = $('#tn-provider');
@@ -708,6 +738,26 @@ function updateTnVis(){
   $('#tn-token').style.display = domestic ? '' : 'none';
   $('#tn-save').style.display = domestic ? '' : 'none';
 }
+
+$('#lan-btn').onclick = e => {
+  e.stopPropagation();
+  const m = $('#lan-menu');
+  m.style.display = m.style.display === 'none' ? '' : 'none';
+};
+$('#lan-menu').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if(!b || b.dataset.u === (QR_LAN || ((QR_ACC || {}).lan_candidates || [])[0])) {
+    $('#lan-menu').style.display = 'none';
+    return;
+  }
+  QR_LAN = b.dataset.u;
+  QR_LAST = '';
+  $('#lan-menu').style.display = 'none';
+  if(QR_ACC) paintQR(QR_ACC);
+});
+document.addEventListener('click', e => {
+  if(!e.target.closest('#lan-pick')) $('#lan-menu').style.display = 'none';
+});
 
 $('#qr-tabs').addEventListener('click', e => {
   const b = e.target.closest('button');
@@ -821,7 +871,7 @@ function paintSessions(sessions){
   const row = s => `
     <div class="dev sess-row" data-id="${esc(s.id)}">
       <span class="st ${s.status === 'running' ? '' : 'off'}"></span>
-      <span class="sess-line"><b>${esc(s.user) || '#未知'}</b> · <span class="sid">${esc(String(s.id || '').slice(0, 10))}</span> - ${esc((s.subject || s.problem || '未分类').slice(0, 24))} - <span class="ago">${fmtAge(s.age_s)}</span></span>
+      <span class="sess-line"><b>${esc(s.user) || '#未知'}</b> - ${esc(plainMD(s.subject || s.problem || '未分类')).slice(0, 24)} - <span class="ago">${fmtAge(s.age_s)}</span></span>
       ${MANAGE ? `<button class="del-btn" data-del="${esc(s.id)}">✕</button>` : ''}
     </div>`;
   box.innerHTML = running.map(row).join('') + done.map(row).join('')
@@ -891,10 +941,10 @@ async function loadSession(){
   try{ d = await api('/api/console/session/' + SESS_ID); }
   catch(e){ closeSession(); return; }
   const stZh = {running:'进行中', finished:'已答完待自评', assessed:'已自评', closed:'已超时关闭'}[d.status] || d.status;
-  $('#sm-title').textContent = (d.user || '#未知') + ' · ' + (d.subject || '未分类');
-  $('#sm-sub').textContent = `#${d.id} · ${stZh} · 进度 ${d.progress[0]}/${d.progress[1]}` +
-    (d.self_score != null ? ` · 自评 ${d.self_score}/5` : '') +
-    (d.mode ? ` · ${d.mode}` : '');
+  $('#sm-title').textContent = `${d.user || '#未知'} | ${plainMD(d.subject || '未分类').replace(/·/g, '-')}`;
+  $('#sm-sub').textContent = `#${d.id} | ${stZh} 进度 ${d.progress[0]}/${d.progress[1]}` +
+    (d.self_score != null ? ` 自评 ${d.self_score}/5` : '') +
+    (d.mode ? ` | ${d.mode}` : '');
   const roleZh = {student: '学生', assistant: '助教'};
   $('#sm-body').innerHTML = (d.messages || []).map(m => {
     const cls = m.kind === 'warning' ? 'msg warn ' + m.role : 'msg ' + m.role;
@@ -906,7 +956,7 @@ async function loadSession(){
   body.querySelectorAll('.msg.assistant, .msg.warn').forEach(texIn);
   body.scrollTop = body.scrollHeight;
   $('#sm-foot').textContent =
-    d.variant_problem ? '变式题：' + d.variant_problem.slice(0, 46) : '';
+    d.variant_problem ? '变式题：' + plainMD(d.variant_problem).slice(0, 46) : '';
 }
 
 async function openSession(id){

@@ -109,16 +109,18 @@ def dual_stack_socket(port: int):
         return None
 
 
-def print_qr(url: str) -> None:
-    try:
-        import qrcode  # 可选依赖，没有就只打印地址
-    except ImportError:
-        print("  （装了 qrcode 这里会打印二维码：pip install qrcode）")
+def minimize_console() -> None:
+    """Web 已经在浏览器里打开了，把黑窗收进任务栏（最小化，不是隐藏——
+    停服务要 Ctrl+C，出错信息也得有地方看，所以不能真藏起来）。"""
+    if sys.platform != "win32":
         return
-    qr = qrcode.QRCode(border=1)
-    qr.add_data(url)
-    qr.make(fit=True)
-    qr.print_ascii(invert=True)
+    try:
+        import ctypes
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 6)      # SW_MINIMIZE
+    except Exception:
+        pass
 
 
 def minimize_console() -> None:
@@ -157,28 +159,13 @@ def main() -> None:
     ips = lan_ips()
     local = f"http://127.0.0.1:{port}"
     lan = f"http://{ips[0]}:{port}" if ips else local
-    v6 = ipv6_global()
 
-    print(f"\n{APP_NAME} v{VERSION}")
-    print(f"  本机  {local}")
-    print(f"  手机  {lan}   ← 同一 WiFi 直接打开")
-    # 校园网会换 IP、还可能隔离客户端，把网卡上的地址都列出来让人挨个试
-    for ip in ips[1:]:
-        print(f"         http://{ip}:{port}   （备用网卡）")
-    if v6:
-        print(f"  手机  http://[{v6}]:{port}")
-        print("         ↑ 有 IPv6 的网络（4G/5G 基本都有）不在同一 WiFi 也能开，第一次要输访问码")
-    print("  扫码 ↓")
-    print_qr(lan)
+    print(f"\n{APP_NAME} v{VERSION} 已启动 | 本机 {local} | 局域网 {lan}")
     if not ws_backend():
-        print("\n提示：没装 websockets，流式通道会降级成一次性返回（功能不受影响）。")
-        print(f'  要逐字显示就装一下："{sys.executable}" -m pip install websockets')
+        print(f"提示：没装 websockets，流式降级为整段返回。安装：\"{sys.executable}\" -m pip install websockets")
     if not find_cloudflared():
-        print("\n提示：没找到 cloudflared，公网隧道那条路暂时开不了（局域网与托管不受影响）。")
-        print("  下载：https://github.com/cloudflare/cloudflared/releases/latest/download/"
-              "cloudflared-windows-amd64.exe")
-        print("  放到 E:\\AI\\cloudflared\\cloudflared.exe 后重启本服务即可。")
-    print("\n按 Ctrl+C 停止\n")
+        print("提示：没找到 cloudflared，公网隧道暂不可用（局域网与托管不受影响）。")
+    print("按 Ctrl+C 停止\n")
 
     if not args.no_open:
         threading.Timer(1.2, lambda: webbrowser.open(local)).start()
@@ -193,7 +180,6 @@ def main() -> None:
     if not args.reload and args.host in ("0.0.0.0", "::"):
         sock = dual_stack_socket(port)
     if sock is not None:
-        print("  已同时监听 IPv4 与 IPv6（同一个端口）")
         uvicorn.Server(uvicorn.Config("app.main:app", log_level="warning")).run(sockets=[sock])
     else:
         uvicorn.run("app.main:app", host=args.host, port=port,

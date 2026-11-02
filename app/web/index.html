@@ -191,6 +191,7 @@ textarea:focus{border-color:#BFC8F5}
 .sym-strip{
   display:flex;gap:6px;overflow-x:auto;padding:2px 2px 8px;
   flex:0 0 auto;scrollbar-width:none;
+  touch-action:pan-x;   /* 只允许横滑接管：轻点不再被浏览器抢成滚动（pointercancel） */
 }
 .sym-strip::-webkit-scrollbar{display:none}
 .sym{
@@ -199,10 +200,23 @@ textarea:focus{border-color:#BFC8F5}
   font-family:inherit;cursor:pointer;line-height:1.4;
 }
 .sym:active{background:var(--brand-soft);border-color:var(--brand)}
-.sym .katex{font-size:1em}
-.sym.gk{display:none}
-.sym-strip.greek .sym.gk{display:inline-block}
-.sym-strip.greek #sym-greek{background:var(--brand-soft);border-color:var(--brand)}
+.sym.on{background:var(--brand-soft);border-color:var(--brand)}
+/* 有二级菜单的入口：只染字和轮廓，底保持白；按下/展开时底纹才有颜色 */
+.sym.more{border-color:#B9C8F2;color:var(--brand)}
+.sym.more:active{background:var(--brand-soft);border-color:var(--brand)}
+.sym.more.on{background:var(--brand-soft);border-color:var(--brand)}
+.sym-wrap{position:relative;flex:0 0 auto}
+.sym-panel{
+  position:absolute;left:0;right:0;bottom:calc(100% + 8px);z-index:40;
+  display:none;grid-template-columns:repeat(6,1fr);gap:6px;
+  background:#fff;border:1px solid var(--line);border-radius:var(--r-md);
+  box-shadow:0 10px 30px rgba(15,23,41,.16);padding:8px;
+  max-height:172px;overflow-y:auto;
+}
+.sym-panel.open{display:grid}
+.sym-panel .sym{min-width:0;padding:6px 2px}
+.sym-panel .sym:active{background:var(--brand-soft);border-color:var(--brand)}
+.sym-panel .sm .katex{font-size:.68em}
 
 .send:disabled{background:#C9CEDA}
 
@@ -662,43 +676,9 @@ input[type=range]::-webkit-slider-thumb{
 
   <footer id="footer">
     <div class="choices" id="choices"></div>
-    <div class="sym-strip" id="sym-strip">
-      <button class="sym" data-s="^{}" data-back="1" data-tex="x^{\square}">x^□</button>
-      <button class="sym" data-s="_{}" data-back="1" data-tex="x_{\square}">x_□</button>
-      <button class="sym" data-s="\log_{}{}" data-back="3" data-tex="\log_{\square}\square">log_□□</button>
-      <button class="sym" data-s="\lim_{{}\to{}} {}" data-back="10" data-tex="\lim_{\square\to\square}\square">lim□→□</button>
-      <button class="sym" data-s="\sum_{i=1}^{n}" data-tex="\sum_{i=1}^{n}">Σ(i=1→n)</button>
-      <button class="sym" data-s="\int_{}^{}" data-back="1" data-tex="\int_{\square}^{\square}">∫□^□</button>
-      <button class="sym" data-s="sqrt()" data-back="1" data-tex="\sqrt{\square}">√□</button>
-      <button class="sym" data-s="/">/</button>
-      <button class="sym" data-s="()" data-back="1" data-tex="(\,\square\,)">( )</button>
-      <button class="sym" data-s="-">−</button>
-      <button class="sym" id="sym-greek" title="希腊字母">α β γ</button>
-      <button class="sym gk" data-s="α">α</button>
-      <button class="sym gk" data-s="β">β</button>
-      <button class="sym gk" data-s="γ">γ</button>
-      <button class="sym gk" data-s="δ">δ</button>
-      <button class="sym gk" data-s="ε">ε</button>
-      <button class="sym gk" data-s="θ">θ</button>
-      <button class="sym gk" data-s="λ">λ</button>
-      <button class="sym gk" data-s="μ">μ</button>
-      <button class="sym gk" data-s="ρ">ρ</button>
-      <button class="sym gk" data-s="σ">σ</button>
-      <button class="sym gk" data-s="τ">τ</button>
-      <button class="sym gk" data-s="φ">φ</button>
-      <button class="sym gk" data-s="ω">ω</button>
-      <button class="sym gk" data-s="Δ">Δ</button>
-      <button class="sym gk" data-s="Θ">Θ</button>
-      <button class="sym gk" data-s="Λ">Λ</button>
-      <button class="sym gk" data-s="Π">Π</button>
-      <button class="sym gk" data-s="Σ">Σ</button>
-      <button class="sym gk" data-s="Φ">Φ</button>
-      <button class="sym gk" data-s="Ω">Ω</button>
-      <button class="sym gk" data-s="∞" data-tex="\infty">∞</button>
-      <button class="sym gk" data-s="≤" data-tex="\leq">≤</button>
-      <button class="sym gk" data-s="≥" data-tex="\geq">≥</button>
-      <button class="sym gk" data-s="≠" data-tex="\neq">≠</button>
-      <button class="sym gk" data-s="±" data-tex="\pm">±</button>
+    <div class="sym-wrap" id="sym-wrap">
+      <div class="sym-panel" id="sym-panel"></div>
+      <div class="sym-strip" id="sym-strip"></div>
     </div>
     <div class="composer">
       <textarea id="input" rows="1" placeholder="说说你的想法…"></textarea>
@@ -2149,9 +2129,9 @@ function openCrop(file){
 }
 
 function setCropBox(x, y, w, h){
-  const r = CROP.rect, MIN = 60;
-  w = Math.max(MIN, Math.min(w, r.w));
-  h = Math.max(MIN, Math.min(h, r.h));
+  const r = CROP.rect, MIN_W = 60, MIN_H = 28;   // 高度压小：单行公式也框得进
+  w = Math.max(MIN_W, Math.min(w, r.w));
+  h = Math.max(MIN_H, Math.min(h, r.h));
   x = Math.max(r.left, Math.min(x, r.left + r.w - w));
   y = Math.max(r.top, Math.min(y, r.top + r.h - h));
   const b = $('#crop-box');
@@ -2186,7 +2166,7 @@ function bindCrop(){
     }
     if(DRAG.mode.includes('e')) w = Math.min(r.left + r.w - x, w + dx);
     if(DRAG.mode.includes('n')){
-      const ny = Math.max(r.top, Math.min(y + h - 60, y + dy));
+      const ny = Math.max(r.top, Math.min(y + h - 28, y + dy));
       h += y - ny; y = ny;
     }
     if(DRAG.mode.includes('s')) h = Math.min(r.top + r.h - y, h + dy);
@@ -2364,42 +2344,131 @@ function insertAtCursor(el, text, back){
   el.setSelectionRange(np, np);
   el.focus();
 }
-/* 输入辅助条：点一下把符号塞进光标处（手机键盘打 ^ {} 这类太费劲）。
-   插入延迟到 pointerup：横滑浏览符号条也是 pointerdown 起步，
-   直接在 down 里插入会把"滑一下"判成"点一下"——
-   走过 8px 或触发了原生滚动（pointercancel）就不算点击。 */
-let SYM_PENDING = null;
-const symStrip = $('#sym-strip');
+/* 输入辅助条：两类入口混排——
+   it＝组（face 为按钮上的提示文字），点它在条上方弹出整组面板，
+        打开另一组自动收起上一组，从它起手横滑(>8px)则收回；
+        按钮带 .more 弱强调色，提示下面还有一层菜单；
+   one＝直接插入的普通按钮，点一下入光标处，
+        走 pointerup 防误触：起手滑动超过 8px 或被浏览器接管(pointercancel)不算点击。 */
+const SYM_ENTRIES = [
+  {face:'+ − ×', it:[
+    {s:'+', l:'+'}, {s:'-', l:'−'}, {s:'*', l:'×'}, {s:'/', l:'÷'}, {s:'=', l:'='}, {s:'±', tex:'\\pm'},
+  ]},
+  {face:'> < =', it:[
+    {s:'<', l:'<'}, {s:'>', l:'>'}, {s:'=', l:'='}, {s:'<=', l:'≤'}, {s:'>=', l:'≥'}, {s:'≠', tex:'\\neq'},
+  ]},
+  {one:{s:'()', b:1, tex:'(\\,\\square\\,)'}},
+  {one:{s:'^{}', b:1, tex:'x^{\\square}'}},
+  {one:{s:'_{}', b:1, tex:'x_{\\square}'}},
+  {one:{s:'\\log_{}{}', b:3, tex:'\\log_{\\square}\\square'}},
+  {one:{s:"'", l:"'"}},
+  {one:{s:'\\lim_{{}\\to{}} {}', b:10, tex:'\\lim_{\\square\\to\\square}\\square'}},
+  {one:{s:'\\sum_{i=1}^{n}', tex:'\\sum_{i=1}^{n}'}},
+  {one:{s:'\\int_{}^{}', b:1, tex:'\\int_{\\square}^{\\square}'}},
+  {face:'α β γ', it:[
+    {s:'α'},{s:'β'},{s:'γ'},{s:'δ'},{s:'ε'},{s:'θ'},{s:'λ'},{s:'μ'},
+    {s:'ρ'},{s:'σ'},{s:'τ'},{s:'φ'},{s:'ψ'},{s:'ω'},{s:'Δ'},
+  ]},
+  {one:{s:'π', tex:'\\pi'}},
+  {one:{s:'e', l:'e'}},
+  {face:'矩阵', it:[
+    {s:'\\begin{bmatrix} & & \\\\ & & \\\\ & & \\end{bmatrix}', b:30, sm:1,
+     tex:'\\begin{bmatrix}1&2&3\\\\4&5&6\\\\7&8&9\\end{bmatrix}'},
+    {s:'\\begin{bmatrix} & \\\\ & \\end{bmatrix}', b:20, sm:1,
+     tex:'\\begin{bmatrix}1&2\\\\3&4\\end{bmatrix}'},
+  ]},
+  {one:{s:'|{}|', b:1, tex:'|\\square|'}},
+];
+
+const symStrip = $('#sym-strip'), symPanel = $('#sym-panel');
+let SYM_OPEN = -1;
+
+SYM_ENTRIES.forEach((en, gi) => {
+  if(en.it){
+    const b = document.createElement('button');
+    b.className = 'sym more';
+    b.dataset.g = gi;
+    b.textContent = en.face;
+    symStrip.appendChild(b);
+  }else{
+    const it = en.one;
+    const b = document.createElement('button');
+    b.className = 'sym';
+    b.textContent = it.l || it.s;
+    b.dataset.s = it.s;
+    if(it.b) b.dataset.back = it.b;
+    if(it.tex) b.dataset.tex = it.tex;
+    symStrip.appendChild(b);
+  }
+});
+
+function closeGroup(){
+  SYM_OPEN = -1;
+  symPanel.classList.remove('open');
+  symPanel.innerHTML = '';
+  symStrip.querySelectorAll('.sym.on').forEach(b => b.classList.remove('on'));
+}
+
+function openGroup(gi){
+  if(SYM_OPEN === gi){ closeGroup(); return; }      // 再点同一组＝收起
+  SYM_OPEN = gi;
+  symPanel.innerHTML = '';
+  SYM_ENTRIES[gi].it.forEach(it => {
+    const b = document.createElement('button');
+    b.className = 'sym';
+    b.textContent = it.l || it.s;
+    if(it.tex) b.dataset.tex = it.tex;
+    if(it.sm) b.classList.add('sm');
+    b.addEventListener('click', () => insertAtCursor(input, it.s, it.b || 0));
+    symPanel.appendChild(b);
+  });
+  symPanel.classList.add('open');
+  symPanel.scrollTop = 0;
+  symStrip.querySelectorAll('.sym').forEach(b =>
+    b.classList.toggle('on', +b.dataset.g === gi));
+  paintSymStrip();                                  // 面板刚建好，公式必须现渲染
+}
+
+let SYM_PENDING = null, SYM_PRESS = null;
 symStrip.addEventListener('pointerdown', e => {
   const b = e.target.closest('.sym');
   if(!b) return;
-  e.preventDefault();          // 别让点按钮把输入框焦点抢走
-  SYM_PENDING = {b, x: e.clientX, y: e.clientY, ok: true};
+  e.preventDefault();            // 别让点按钮把输入框焦点抢走
+  if(b.dataset.g !== undefined){
+    openGroup(+b.dataset.g);
+    SYM_PRESS = {g: SYM_OPEN, x: e.clientX, y: e.clientY};
+  }else{
+    SYM_PENDING = {b, x: e.clientX, y: e.clientY, ok: true};
+  }
 });
 symStrip.addEventListener('pointermove', e => {
-  if(!SYM_PENDING) return;
-  if(Math.hypot(e.clientX - SYM_PENDING.x, e.clientY - SYM_PENDING.y) > 8){
-    SYM_PENDING.ok = false;
+  const st = SYM_PENDING || SYM_PRESS;
+  if(!st) return;
+  if(Math.hypot(e.clientX - st.x, e.clientY - st.y) > 8){
+    if(SYM_PENDING) SYM_PENDING.ok = false;
+    if(SYM_PRESS && SYM_OPEN === SYM_PRESS.g) closeGroup();   // 起手是滑动就不算点开
+    SYM_PENDING = null; SYM_PRESS = null;
   }
 });
 symStrip.addEventListener('pointerup', () => {
   const st = SYM_PENDING;
-  SYM_PENDING = null;
+  SYM_PENDING = null; SYM_PRESS = null;
   if(!st || !st.ok) return;
-  const b = st.b;
-  if(b.id === 'sym-greek'){    // 希腊字母：展开/收起，不插字符
-    symStrip.classList.toggle('greek');
-    return;
-  }
-  if(b.dataset.s) insertAtCursor(input, b.dataset.s, +(b.dataset.back || 0));
+  if(st.b.dataset.s) insertAtCursor(input, st.b.dataset.s, +(st.b.dataset.back || 0));
 });
-symStrip.addEventListener('pointercancel', () => { SYM_PENDING = null; });
+symStrip.addEventListener('pointercancel', () => { SYM_PENDING = null; SYM_PRESS = null; });
+document.addEventListener('pointerdown', e => {
+  if(SYM_OPEN >= 0 && !e.target.closest('#sym-wrap')) closeGroup();
+}, true);
+/* 手机浏览器（尤其 iOS Safari）要"页面被摸过"才启用 :active 按下反馈 */
+document.addEventListener('touchstart', () => {}, {passive:true});
 // katex.min.js 是 defer 加载的，内联脚本跑的时候它还没就绪——
-// 渲染必须等 boot()（DOMContentLoaded），失败时按钮留着纯文本兜底
+// 渲染必须等 boot()（DOMContentLoaded），失败时按钮留着纯文本兜底。
+// 扫描范围是整个 #sym-wrap：符号条上的按钮和弹出面板里的按钮都要覆盖
 function paintSymStrip(){
   if(!window.katex) return;
-  document.querySelectorAll('#sym-strip .sym[data-tex]').forEach(b => {
-    try{ katex.render(b.dataset.tex, b, {throwOnError:false}); }catch(err){}
+  document.querySelectorAll('#sym-wrap [data-tex]').forEach(el => {
+    try{ katex.render(el.dataset.tex, el, {throwOnError:false}); }catch(err){}
   });
 }
 

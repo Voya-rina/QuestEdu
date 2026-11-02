@@ -52,7 +52,7 @@ class EngineCase(unittest.TestCase):
 
 class TestCreate(EngineCase):
     def test_problem_count(self):
-        self.assertEqual(len(ALL_IDS), 7)
+        self.assertEqual(len(ALL_IDS), len(PROBLEMS))
 
     def test_payload_shape(self):
         sess, payload = Engine.create(problem_id="limit")

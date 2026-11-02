@@ -23,7 +23,10 @@ def expected_answer(sess: Session) -> str:
     """按引擎当前所处的子状态，给出一个必然判对的说法。"""
     node = sess.nodes[sess.node_idx]
     if node.get("followup") and sess.followup_done:
-        return str(node["followup"]["numeric"])
+        f = node["followup"]
+        if f.get("numeric"):
+            return str(f["numeric"])
+        return (f.get("answers") or ["不知道"])[0]
     if node.get("numeric"):
         return str(node["numeric"])
     answers = node.get("answers") or []
