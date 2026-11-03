@@ -272,11 +272,12 @@ def parse_student_expr(s: str):
     s = voice_to_expr(s)             # 语音口语：3x方 → 3x^2、五倍x的四次方 → 5*x^4
     s = (s.replace("×", "*").replace("÷", "/").replace("－", "-")
           .replace("－", "-").replace("＊", "*"))
+    s = re.sub(r"\s+", "", s)         # 空白先去掉：字符白名单里没有空格
     if "=" in s:                     # "y=9x-16"、"f(x)=x^2" 取等号右边
         s = s.rsplit("=", 1)[-1].strip()
     if not _EXPR_ONLY.match(s):
         return None
-    s = re.sub(r"\s+", "", s).replace("^", "**")
+    s = s.replace("^", "**")
     if not s or _CJK.search(s) or _DANGEROUS.search(s):
         return None
     try:
@@ -477,6 +478,292 @@ def evaluate(expr_str: str):
     return _with_timeout(_evaluate_raw, (src,))
 
 
+# ---------------------------------------------------------------- 隐函数求导
+#
+# 这类题的中间结果靠"模型看"是看不住的：实测 2B 模型把 xy² 的导数写成
+# 2xy+y²y'（正解 y²+2xyy'），换个温度又给出合法但毫无必要的对数合并。而它的
+# 真相完全由符号引擎决定——Fx、Fy、y'=-Fx/Fy、该点的 y、最终数值，一条链算到底。
+# 算出来之后有两个用处：校验模型的拆解（错在哪一步说得出），以及模型彻底跑偏时
+# 直接给一份保证正确的骨架。
+
+_XS = sp.Symbol("x", real=True)
+_YS = sp.Symbol("y", real=True)
+_YPS = sp.Symbol("yp", real=True)
+
+_SUP = str.maketrans({
+    "⁰": "**0", "¹": "**1", "²": "**2", "³": "**3", "⁴": "**4",
+    "⁵": "**5", "⁶": "**6", "⁷": "**7", "⁸": "**8", "⁹": "**9",
+    "·": "*", "×": "*", "÷": "/", "−": "-", "–": "-", "—": "-",
+})
+
+_YP_MARK = re.compile(r"d\s*y\s*/\s*d\s*x|y\s*['′’]", re.I)
+# 只写了导数记号的那一侧（"y'=..."、"dy/dx=..."）
+_Y_LABEL = re.compile(
+    r"^\s*(?:y|f\s*\(\s*x\s*\)|y\s*['′’]|dy\s*/\s*dx|f\s*['′’]\s*\(\s*x\s*\))\s*$", re.I)
+# 同一件事，但允许前面挂着"所以/得到"这类引导语
+_Y_LABEL_TAIL = re.compile(
+    r"(?:y\s*['′’]|dy\s*/\s*dx|f\s*['′’]\s*\(\s*x\s*\))\s*$", re.I)
+# 题面里的隐函数方程：一整段只含 ASCII 数学字符、且恰有一个等号
+_EQ_CAND = re.compile(r"[0-9A-Za-z()+\-*/^.\s]+=[0-9A-Za-z()+\-*/^.\s\-]+")
+_IMPL_MARK = re.compile(
+    r"dy\s*\)?\s*/\s*\(?\s*dx|y\s*['′’]|隐函数|求导", re.I)
+_XPT = re.compile(r"x\s*=\s*(-?\d+(?:\.\d+)?(?:\s*/\s*\d+)?)")
+
+
+def math_text_to_expr(s, with_yp: bool = False):
+    """把自然书写的式子解析成 SymPy 表达式。
+
+    容忍：`y'`/`dy/dx`（→ yp）、上标 ²³、`·`、`−`、`ln`、LaTeX 片段、缺乘号。
+    只接受自由符号落在 x/y(/yp) 里的式子，其余一律当噪声返回 None——
+    和 clean_numeric 一个口径：宁可少一层判定，不可拿一个怪符号去比。
+    """
+    t = str(s or "").strip()
+    if not t or len(t) > 200:
+        return None
+    t = t.translate(_FULL).translate(_SUP)
+    t = latex_to_ascii(t)
+    # 导数记号换成单字母 Y：写成 "yp" 时隐式乘法会把 "2xyyp" 拆成
+    # 2*x*y*y*p，凭空多出一个符号 p，整条式子就被自由符号检查挡掉了
+    t = _YP_MARK.sub("Y", t)
+    t = t.replace("ln(", "log(")
+    t = re.sub(r"ln\s*([A-Za-z][A-Za-z0-9]*)", r"log(\1)", t)
+    # LaTeX 转过来会留下 "log y" 这种没括号的写法，隐式乘法会把它读成 log*y
+    t = re.sub(r"\blog\s+([A-Za-z][A-Za-z0-9]*)", r"log(\1)", t)
+    t = t.replace("^", "**").replace(" ", "")
+    if not t or _DANGEROUS.search(t):
+        return None
+    ns = {**_SAFE, "x": _XS, "y": _YS}
+    if with_yp:
+        ns["Y"] = _YPS
+    try:
+        e = _parse_expr(t, local_dict=ns, transformations=TRANSFORMS)
+    except Exception:
+        return None
+    if not isinstance(e, sp.Basic):
+        return None
+    free = {str(sym) for sym in getattr(e, "free_symbols", set())}
+    if free - ({"x", "y", "yp"} if with_yp else {"x", "y"}):
+        return None
+    return e
+
+
+def _ratio_raw(num, den) -> bool:
+    """num/den 是不是一个非零常数——"两个等式等价"的判据。
+
+    正确的移项、整体乘 −1 都只是差一个常数倍；化简证不出时再代三个点看比值
+    是否稳定（和 same() 的抽点策略一致）。
+    """
+    if num is None or den is None:
+        return False
+    try:
+        r = sp.simplify(sp.together(num / den))
+        if r != 0 and not r.free_symbols:
+            return True
+    except Exception:
+        pass
+    pts = [
+        {_XS: sp.Rational(7, 3), _YS: sp.Rational(5, 2), _YPS: sp.Rational(-3, 4)},
+        {_XS: sp.Rational(-2, 5), _YS: sp.Rational(9, 4), _YPS: sp.Rational(2, 7)},
+        {_XS: sp.Rational(1, 3), _YS: sp.Rational(6, 5), _YPS: sp.Rational(-5, 3)},
+    ]
+    vals = []
+    for p in pts:
+        try:
+            va = complex(sp.N(num.subs(p)))
+            vd = complex(sp.N(den.subs(p)))
+        except Exception:
+            return False
+        if abs(vd) < 1e-12:
+            return False
+        vals.append(va / vd)
+    if abs(vals[0]) < 1e-12:
+        return False
+    return all(abs(v - vals[0]) <= 1e-8 * max(1.0, abs(vals[0])) for v in vals)
+
+
+def equation_diff_ok(text: str, truth: dict):
+    """候选答案是不是"两边求导后得到的等式"。
+
+    返回 True/False/None——None 表示这句话里根本没有 y'，不归这条判。
+    写成 "…=0" 或只写左边那串（"y²+2xyy'-1/(x+1)+y'/y"）都算。
+    """
+    s = str(text or "")
+    if "=" in s:
+        left, right = s.rsplit("=", 1)
+        e = math_text_to_expr(f"({left})-({right})", with_yp=True)
+    else:
+        e = math_text_to_expr(s, with_yp=True)
+    if e is None or _YPS not in e.free_symbols:
+        return None
+    return bool(_with_timeout(_ratio_raw, (e, truth.get("G"))))
+
+
+def dy_expr_ok(text: str, truth: dict):
+    """候选答案是不是"解出的 y'"。返回 True/False/None。
+
+    两种写法都算：`y'=(1/(x+1)-y²)/(2xy+1/y)`，以及只写右边那个式子
+    （模型的「问」是"y' 等于多少"，此时「答」只给式子也完全成立）。
+    """
+    s = str(text or "")
+    if "=" in s:
+        left, right = s.rsplit("=", 1)
+        if not (_Y_LABEL.match(left) or _Y_LABEL_TAIL.search(left)):
+            return None
+        e = math_text_to_expr(right)
+    else:
+        e = math_text_to_expr(s)
+    if e is None:
+        return False
+    # 没有 x/y 的式子（"e"、"e-e^3"）是某点的函数值，不是导函数表达式——
+    # 归这条判就会把"代值求 dy/dx"那一步判成"导函数写错"
+    if not getattr(e, "free_symbols", set()):
+        return None
+    return same(e, truth.get("dy"))
+
+
+def term_deriv_ok(text: str, truth: dict):
+    """候选答案是不是方程里某一项对 x 的全导数（y 当 y(x)）。
+
+    逐项求导是比"整体求导"更细的教法（实测模型两种都会出），不能因为没写出
+    完整等式就否掉——但每项必须真算对：xy² 的导数是 y²+2xyy'，不是 2xy+y²y'。
+    """
+    e = math_text_to_expr(text, with_yp=True)
+    if e is None:
+        return None
+    for cand in truth.get("terms") or ():
+        if same(e, cand):
+            return True
+    return False
+
+
+def x_term_deriv_ok(text: str, truth: dict):
+    """不含 y' 的那几项的导数，如 -ln(x+1) 的导数是 -1/(x+1)。
+
+    这类答案里没有 y'，光看式子看不出对错——实测模型把负号吃掉写成 1/(x+1)，
+    后面整体求导就跟着错。只在对得上"某一项真实导数"时才算过。
+    """
+    e = math_text_to_expr(text)
+    if e is None or _YS in getattr(e, "free_symbols", set()) or e.is_number:
+        return None             # 纯数值（或含 y）不归这条判，免得误伤代值小步
+    for cand in truth.get("terms") or ():
+        if _YPS in getattr(cand, "free_symbols", set()):
+            continue
+        if same(e, cand):
+            return True
+    return False
+
+
+def _pick_equation(text: str):
+    """从题面里挑出隐函数方程，返回 (原文, F, 左, 右) 或 None。
+
+    题面里通常还有 "y=y(x)" 这种说明，它不是方程——按"含 x 和 y 且最长"挑，
+    短的、以及 y=y(x) 本身一律跳过。
+    """
+    best = None
+    for m in _EQ_CAND.finditer(text):
+        s = m.group().strip()
+        if s.count("=") != 1:
+            continue
+        left, right = s.split("=")
+        if (re.fullmatch(r"\s*y\s*", left)
+                and re.fullmatch(r"\s*y\s*\(\s*x\s*\)\s*", right)):
+            continue
+        F = math_text_to_expr(f"({left})-({right})")
+        if F is None or F == 0:
+            continue
+        if not ({_XS, _YS} <= getattr(F, "free_symbols", set())):
+            continue
+        if best is None or len(s) > len(best[0]):
+            best = (s, F, left.strip(), right.strip())
+    return best
+
+
+def _implicit_raw(problem: str):
+    # 题面可能是 LaTeX（"$xy^{2}-\ln(x+1)+\ln y=5$"，求导写成 \frac{dy}{dx}）。
+    # 先转成 ASCII 再挑方程，否则花括号一挡，_pick_equation 只能捞到半截式子，
+    # 算出个假真值——比没有真值更糟
+    plain_text = latex_to_ascii(str(problem or ""))
+    if not (_IMPL_MARK.search(problem) or _IMPL_MARK.search(plain_text)):
+        return None
+    picked = _pick_equation(plain_text)
+    if picked is None:
+        return None
+    eq_text, F, _, _ = picked
+    m = _XPT.search(problem) or _XPT.search(plain_text)
+    if not m:
+        return None
+    try:
+        x0 = sp.sympify(m.group(1).replace(" ", ""), rational=True)
+    except Exception:
+        return None
+
+    Fx, Fy = sp.diff(F, _XS), sp.diff(F, _YS)
+    if Fx == 0 or Fy == 0:
+        return None
+    dy = -Fx / Fy
+
+    sols = sp.solve(sp.Eq(F.subs(_XS, x0), 0), _YS)
+    cands = []
+    for sol in sols:
+        sol = sp.simplify(sol)
+        if sol.has(_XS, _YS) or sol.is_real is False:
+            continue
+        try:
+            if not sol.is_finite:
+                continue
+        except Exception:
+            continue
+        # 隐函数存在定理：这点上 Fy 不能为 0，否则 y' 无意义
+        if Fy.subs({_XS: x0, _YS: sol}) == 0:
+            continue
+        cands.append(sol)
+    if not cands:
+        return None
+    # 优先正的（题里有 ln y，定义域本来就在 y>0）
+    cands.sort(key=lambda s: (s.is_positive is not True, len(str(s))))
+    y0 = cands[0]
+
+    val = sp.simplify(dy.subs({_XS: x0, _YS: y0}))
+    if val is None or val.has(_XS, _YS) or val in (sp.zoo, sp.nan, sp.oo, -sp.oo):
+        return None
+    return {
+        "x0": x0, "y0": y0, "value": val,
+        "F": F, "Fx": Fx, "Fy": Fy,
+        "dy": dy, "G": Fx + Fy * _YPS,        # 两边求导后的等式（=0）
+        # F 拆成加法项后，每项对 x 的全导数：逐项求导那种拆解的校验基准
+        "terms": [sp.diff(t, _XS) + sp.diff(t, _YS) * _YPS
+                  for t in sp.Add.make_args(F)],
+        "eq": eq_text,
+        "x0_s": sp.sstr(x0), "y0_s": sp.sstr(y0),
+        "value_s": sp.sstr(val),
+        "dy_s": sp.sstr(dy),
+        "G_s": sp.sstr(Fx + Fy * _YPS).replace("yp", "y'"),
+    }
+
+
+def implicit_derivative(problem: str):
+    """隐函数求导题的确定性真值；不是这类题、或算不出来时返回 None。
+
+    返回的 dict 里 value 是题目最终要求的值，dy 是 y' 的表达式。
+    算不出来就返回 None，调用方一切照旧——宁可少一层校验，不可误伤别的题型。
+    """
+    return _with_timeout(_implicit_raw, (str(problem or ""),), timeout=6)
+
+
+def same_equation_ok(text: str, truth: dict) -> bool:
+    """这段「答」是不是把原方程原样抄了回来（没做任何计算）。"""
+    s = str(text or "")
+    if "=" in s:
+        left, right = s.rsplit("=", 1)
+        e = math_text_to_expr(f"({left})-({right})")
+    else:
+        e = math_text_to_expr(s)
+    F = truth.get("F")
+    if e is None or F is None:
+        return False
+    return bool(_with_timeout(_ratio_raw, (e, F)))
+
+
 def latex(expr) -> str:
     """转成前端 KaTeX 能渲染的 LaTeX。"""
     try:
@@ -490,3 +777,11 @@ def plain(expr) -> str:
         return sp.sstr(expr)
     except Exception:
         return str(expr)
+
+
+def pretty(expr) -> str:
+    """给学生看的写法：SymPy 的 E / exp(3) 换成学生写的 e / e^(3)。
+
+    提示词里塞 "y = E" 这种，模型会原样抄进「问」句，等于把答案先说了。
+    """
+    return plain(expr).replace("exp(", "e^(").replace("E", "e")

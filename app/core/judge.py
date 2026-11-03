@@ -68,6 +68,27 @@ def _expr_answer_ok(text: str, want) -> bool:
     return got is not None and mathcheck.same(got, want)
 
 
+def _numeric_got(text: str, want, model_value: str = ""):
+    """按期望值的类型选最稳的抽取方式。
+
+    纯分数/整数/小数 → number_in 抽数字最可靠；
+    含 e / pi / sqrt 这类符号常数 → 必须整式解析：number_in 会把 e-e³
+    抽成上标里的 3，答对的学生被翻成错（实测循环重问的元凶）。
+    抽不到返回 None——调用方保持模型判定不动，绝不瞎翻。
+    """
+    if getattr(want, "is_rational", False):
+        for src in (model_value, text):
+            if src:
+                got = mathcheck.number_in(src)
+                if got is not None:
+                    return got
+        return None
+    got = mathcheck.parse_student_expr(text)
+    if got is None and model_value:
+        got = mathcheck.parse_student_expr(model_value)
+    return got
+
+
 def verdict_offline(text: str, node: dict):
     """离线判定。返回 (verdict, got, reply_override)。
 
@@ -82,7 +103,7 @@ def verdict_offline(text: str, node: dict):
         # 不能因为一条不可求值的期望值，把答对的学生判成错。
         if want is not None:
             if want.is_number:
-                got = mathcheck.number_in(text)
+                got = _numeric_got(text, want)
                 if got is not None:
                     return ("correct" if mathcheck.same(got, want) else "wrong"), got, ""
             else:
@@ -176,12 +197,8 @@ def verdict_cloud(text: str, node: dict, history: list):
     if node.get("numeric"):
         want = mathcheck.parse_expr(node["numeric"])
         if want is not None and want.is_number:
-            got = None
-            for src in (str(data.get("extracted_value", "") or ""), text):
-                if src:
-                    got = mathcheck.number_in(src)
-                    if got is not None:
-                        break
+            got = _numeric_got(text, want,
+                               str(data.get("extracted_value", "") or ""))
             if got is not None:
                 # 符号引擎说话，模型让位——护城河就落在这几行
                 verdict = "correct" if mathcheck.same(got, want) else "wrong"

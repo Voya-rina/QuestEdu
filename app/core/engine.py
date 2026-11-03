@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import lru_cache
 
 from app.core import llm, mathcheck
 from app.core.judge import BYPASS_PHRASES, hint_for, hits, verdict_cloud, verdict_offline
@@ -24,10 +27,65 @@ log = logging.getLogger(__name__)
 MAX_WRONG_PER_NODE = 3
 
 
+@lru_cache(maxsize=32)
+def _truth_of(problem: str):
+    """按题面缓存的符号真值（隐函数求导才有）。
+
+    拆题和判分各要查一次，重算一次几十毫秒；判定是每个答案都走的路径，
+    不值得每次重算。
+    """
+    return mathcheck.implicit_derivative(problem)
+
+
+# 判定学生答案时能用的符号闸，顺序即优先级
+_NODE_CHECKS = (
+    mathcheck.equation_diff_ok,
+    mathcheck.dy_expr_ok,
+    mathcheck.term_deriv_ok,
+    mathcheck.x_term_deriv_ok,
+)
+
+
+def symbolic_accepts(node: dict, text: str, truth) -> bool:
+    """学生的回答在符号层算不算对（只认这一步期望的那一类）。
+
+    期望是完整等式时，学生只给一个单项导数不能算过。对不上就不表态，
+    判定权交回上一层——宁可漏判，不可误判。
+    """
+    if not truth or not (text or "").strip():
+        return False
+    exp = node.get("expect") or ""
+    for chk in _NODE_CHECKS:
+        try:
+            if chk(exp, truth) is True and chk(text, truth) is True:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 
 def choices_of(node: dict | None) -> list:
     """节点可选的选择题选项；没有就是空列表，前端据此决定要不要画选项条。"""
     return list((node or {}).get("choices") or [])
+
+
+# 判对之后不该再出现的话：让学生重做/重说/确认，或者又抛一个问题
+_REAFFIRM_NG = re.compile(
+    r"请|写出|写一|说明|解释|确认|重新|告诉我|想一想|试一|再算|再想|验证|对吗|是不是")
+
+
+def _affirm(reply: str, node: dict, fallback: str = "") -> str:
+    """判对之后开口说的那一句。
+
+    判定模型偶尔判了 correct 却回一句"请写出原方程的具体形式"——自相矛盾，
+    学生会以为自己的答案不算数。这类跑偏的回复换掉，换成节点自带的肯定语
+    或一句通用的；短肯定原样留着。
+    """
+    t = (reply or "").strip()
+    if t and len(t) <= 40 and "？" not in t and "?" not in t and not _REAFFIRM_NG.search(t):
+        return t
+    return fallback or node.get("correct_reply") or "对，就是这样。"
 
 
 def ensure_question(text: str) -> str:
@@ -136,9 +194,11 @@ PLAN_SYSTEM = """你是数学助教，把一道题拆成学生逐步作答的小
 
 规则简版（细节照示例学）：
 - 「问」：一步只问一件事的具体疑问句（…是多少/几/什么？），记号要学生打得出；
+  一个节点只有一个问号，禁止把两步塞进同一句；
   禁止流程反问（"然后呢""明白了吗"）、指令式（"写出…"）、把答案喂到嘴边、节点间重复
 - 「答」：一口气说得完的一个数 / 式子 / 名词；「式」是它的 SymPy 形式（纯 ASCII，
   如 1/2、sqrt(2)/2、E-E**3），非数值写 ""
+  「答」禁止写成等式或整条方程（移项后的等式也不行）——只写一侧的式子或一个数
 - 节点 = 标准解法的必要步骤：先在心里完整解一遍，按解题顺序原样拆开；
   禁止对解题没帮助的代数变形（如隐函数求导里合并对数——逐项直接求导才是正路）
 - **最后一个节点必须问出题目最终要求的那个量，它答完题目就结束**；
@@ -153,7 +213,10 @@ PLAN_SYSTEM = """你是数学助教，把一道题拆成学生逐步作答的小
 示例二（xy²−ln(x+1)+ln y=1，y=y(x)，求 x=0 处的 dy/dx）——这是标准拆法，
 照这个样子和顺序拆：**逐项直接对 x 求导（含 y 的项求导后尾巴带 y'）→ 解出 y' →
 代数值 → 求出 dy/dx 即到最后一节点，后面没有任何节点**；全程不做对数合并、
-通分之类的方程变形：
+通分之类的方程变形。第一个节点就直接算数学（代值或求某项的导数），
+禁止拿"ln y 可化为 ln x + ln y""能不能把对数合并/化简"这类问题开场——
+ln y 不存在"拆成 ln x + ln y"这种变形；对数只有 ln a + ln b = ln(ab) 一条
+真实法则，且在本类题里禁用：
 {"题型":"隐函数求导","知识点":["链式法则","乘积法则"],"难度":"中等","节点":[
 {"问":"xy² 这个乘积对 x 的导数是谁？","答":"y²+2xyy'","式":""},
 {"问":"方程两边同时关于自变量 x 求导（y 是 y(x)）后，等式变形为什么？","答":"y²+2xyy'-1/(x+1)+y'/y=0","式":""},
@@ -188,6 +251,13 @@ _META_Q = re.compile(
     r"|继续(吗|吧|么)|好不好|行不行|然后呢|怎么办|明白了吗|听懂了吗|接下来"
 )
 
+# 判定说错、话术却在肯定（实测：符号答案 e-e³ 被数值闸抽残翻成 wrong，
+# reply 却是"对，就是这样"）——学生被夸完再被重问同一句，永远走不到终点。
+# 以判定为准：肯定话术丢弃，走标准纠错路径。
+_AFFIRM_REPLY = re.compile(
+    r"对[的，,。！!]|就是这样|没错|完全正确|回答正确|答对了|正是|正确[！!。]"
+)
+
 
 def _real_question(q: str) -> bool:
     """一个节点问句是否"能答"：以问号结尾、不是流程反问、不是教师备注。"""
@@ -198,7 +268,18 @@ def _real_question(q: str) -> bool:
         return False
     if _TEACHER_TALK.match(t):
         return False
+    if _BOGUS_LOG.search(t):
+        return False
     return True
+
+
+# 实测模型会编造对数"恒等式"当考察点（"lny 可化为 lnx+lny？"——数学上
+# 根本不成立），还爱拿它当第一个节点。对数词 + 拆/合动词同现即废节点。
+_BOGUS_LOG = re.compile(
+    r"(?:ln|对数)[^。？！?!]{0,24}(?:可化为|化为|拆成|拆为|合并为|合并成|写成)"
+    r"|(?:可化为|拆成|拆为|合并为|合并成|写成)[^。？！?!]{0,24}(?:ln|对数)",
+    re.I,
+)
 
 
 # 模型爱写指令句（"将 x=2 代入…计算 y 值。"），ensure_question 只会补
@@ -243,6 +324,23 @@ def extract_questions(raw: str) -> list[dict]:
     return out
 
 
+# 只写了导数记号的那一侧：这种等式的右边才是答案，不算"整条方程"
+_DERIV_LABEL = re.compile(
+    r"^\s*(?:y|f\s*\(\s*x\s*\)|y\s*['′’]|dy\s*/\s*dx|d\s*y\s*/\s*d\s*x"
+    r"|f\s*['′’]\s*\(\s*x\s*\))\s*$", re.I)
+
+
+def _is_equation_answer(src) -> bool:
+    """「答」是不是被写成了整条方程（左边有实义项，不是单纯的 y' = ...）。"""
+    s = str(src or "")
+    if "=" not in s:
+        return False
+    left = s.rsplit("=", 1)[0]
+    if _DERIV_LABEL.match(left):
+        return False
+    return bool(re.search(r"[A-Za-z]", left))
+
+
 def _build_nodes(raw_nodes: list, meta: dict, budget: int) -> list[dict]:
     """把模型给的原始节点洗成引擎可用的节点（清洗 + 兜底）。"""
     nodes = []
@@ -253,9 +351,15 @@ def _build_nodes(raw_nodes: list, meta: dict, budget: int) -> list[dict]:
         # 「式」是模型写的自由文本，必须先洗成可求值的表达式再入库：
         # 洗不出来就当没有数值答案（判定退回关键词匹配），绝不让一个
         # "二阶" 这种串被 sympify 悄悄当成符号，把答对的学生判成错
-        numeric = mathcheck.clean_numeric(nd.get("式") or nd.get("sympy检查"))
+        raw_num = nd.get("式") or nd.get("sympy检查")
+        numeric = mathcheck.clean_numeric(raw_num)
         if not numeric:
             numeric = mathcheck.clean_numeric(ans)     # 模型常把值写在「答」里
+        # 「答」写成整条方程时（"y²+2xyy'-1/(x+1)+y'/y=0"），clean_numeric 只留
+        # 最后一个等号右边，整条式子悄悄变成数值 0 —— 之后拿 0 去比对，答对的
+        # 学生被判错。这种答案本来就该当表达式判，不能留下数值
+        if numeric and (_is_equation_answer(raw_num) or _is_equation_answer(ans)):
+            numeric = ""
         # 「式」与「答」互相矛盾时丢弃「式」：实测模型给过 答"y=9x-16" 配
         # 式"1/2" 的垃圾——不丢的话数值比对会劫持判定，学生答对也判错。
         # 宁可少一层判定，不可误判
@@ -287,16 +391,315 @@ def _build_nodes(raw_nodes: list, meta: dict, budget: int) -> list[dict]:
     return nodes
 
 
+_IMPLICIT_RULES = """
+这道题是隐函数求导，按标准解法固定这几步，一步一个节点：
+1) 方程两边对 x 求导（含 y 的项求导后要带一个 y'）→ 得到求导后的等式
+2) 把含 y' 的项归到一边，解出 y'（用 x 和 y 表示）
+3) 把题给的点代回**原方程**，求出该点的 y
+4) 把点代进 y' 的表达式，求出 dy/dx —— 这一节点答完题目就结束
+禁止合并对数、通分、把方程改写成别的形式再求导；禁止跳过第 3 步直接代值。
+**「问」里绝对不许写出该点的 y 值或最终答案**——那是要学生自己算出来的，
+写进问句就等于替他做了。"""
+
+
+def _implicit_hint(truth: dict) -> str:
+    """把符号引擎算好的真相塞给模型当内部参考。
+
+    小模型不是"不会拆"，是"算不对"——实测同一个提示词连跑三次，xy² 的导数
+    分别写成 y²+2xyy'、2xy+y²y'、和一次对数合并后的怪式子。给它算好的值，
+    它负责组织话术，数学对错由这里兜底。
+    """
+    return (
+        "\n\n【服务端已用符号引擎算好（内部参考，用来校正你的拆解；"
+        "禁止在「问」里说出这些值）】\n"
+        f"- 该点的 y 值：y = {mathcheck.pretty(truth['y0'])}\n"
+        f"- 最终结果：dy/dx = {mathcheck.pretty(truth['value'])}\n"
+        "「问」里只出现题目给的条件（点 x=..., 原方程），这两条只用来核对你写的「答」。"
+    )
+
+
+def _issue_feedback(issues: list[str]) -> str:
+    return ("\n\n你上一次输出的拆解有这些硬伤，逐条改掉后**重新输出全部节点**：\n- "
+            + "\n- ".join(issues))
+
+
+def _value_of(node: dict):
+    """节点答案的数值形式；容忍 "ln y = 1 ⇒ y=e" 这种带推导的写法。"""
+    num = node.get("numeric")
+    if num:
+        e = mathcheck.parse_expr(num)
+        if e is not None:
+            return e
+    t = str(node.get("expect") or "").strip()
+    if not t:
+        return None
+    for sep in ("⇒", "→", "=>", "所以", "即", "得"):
+        if sep in t:
+            t = t.rsplit(sep, 1)[-1]
+    t = t.strip().strip("。；;")
+    if "=" in t:
+        t = t.rsplit("=", 1)[-1]
+    return mathcheck.math_text_to_expr(t)
+
+
+_DERIV_MARK = re.compile(r"y\s*['′’]|dy\s*/\s*d\s*x", re.I)
+
+
+def _clause_kinds(text: str, truth: dict, talks_deriv: bool) -> tuple[set, bool]:
+    """单句答案命中了哪几类（eq/dy/term），以及是否确实算错。
+
+    容忍"xy² 的导数是 y²+2xyy'"、"所以 y' = …"这种带引导语的写法：
+    逐个把"是/为/得/等于"后面的尾巴也拿来试一遍。
+    """
+    cands = [text]
+    for sep in ("是", "为", "得", "等于", "：", ":"):
+        if sep in text:
+            cands.append(text.rsplit(sep, 1)[-1])
+    talks_deriv = talks_deriv or "导" in text
+    kinds: set[str] = set()
+    parsed = False
+    for c in cands:
+        c = c.strip().strip("。；;")
+        if not c:
+            continue
+        mentions = bool(_DERIV_MARK.search(c))
+        eq = mathcheck.equation_diff_ok(c, truth)
+        dy = mathcheck.dy_expr_ok(c, truth)
+        if mentions:
+            term = mathcheck.term_deriv_ok(c, truth)
+        elif talks_deriv:
+            term = mathcheck.x_term_deriv_ok(c, truth)
+        else:
+            term = None
+        hit = False
+        for name, r in (("eq", eq), ("dy", dy), ("term", term)):
+            if r is True:
+                kinds.add(name)
+                hit = True
+            elif r is not None:
+                parsed = True       # 解析出来了但对不上
+        if hit:
+            return kinds, False
+    # 一句话都没解析出来（整段是推导过程）时算 na，不算错——按错处理会误杀
+    # 完全正确的计划，实测就发生过：带演算过程的正确答案被整份打回
+    return kinds, parsed
+
+
+def _node_kinds(expect: str, truth: dict, question: str = "") -> tuple[set, bool]:
+    exp = str(expect or "").strip()
+    if not exp:
+        return set(), False
+    parts = [p for p in re.split(r"[，,；;。]", exp) if p.strip()] or [exp]
+    talks_deriv = "导" in str(question or "")
+    kinds: set[str] = set()
+    bad = False
+    for p in parts:
+        k, b = _clause_kinds(p, truth, talks_deriv)
+        kinds |= k
+        bad = bad or b
+    return kinds, bad
+
+
+def _node_math(expect: str, truth: dict, question: str = "") -> str:
+    """这个节点的答案在数学上站不站得住：ok / bad / na。
+
+    含 y' 的答案只认三类：两边求导后的等式、解出的 y'、F 中某一项的全导数。
+    一句话里写了几段（逐项求导那种）就逐段判——命中任意一类就算过关，
+    有一句解析出来却对不上才算算错。
+    """
+    kinds, bad = _node_kinds(expect, truth, question)
+    if bad:
+        return "bad"
+    return "ok" if kinds else "na"
+
+
+# 句子里"得 y=e"这种：已经把结果算出来给学生看了
+_ASSIGN_CALC = re.compile(r"(?:得|即|所以|于是|因此|可知|⇒|→|=>)\s*[^，。；？]{0,24}[=＝]")
+# 纯代值写法（x=0、y=2）不算泄题，先把它们剔掉再看还剩不剩等号
+_SUBST = re.compile(r"[A-Za-z]\s*[=＝]\s*[-+]?[0-9A-Za-z]+")
+
+
+# 「答」里出现这些，说明模型写的是推导/自我怀疑，不是答案
+_BAD_EXPECT = re.compile(r"[？?]|≠|重新检查|重新算|不确定|似乎|实际上|自相矛盾")
+
+
+def _scrub_leak(q: str, truth: dict, is_last: bool) -> str:
+    """把问句里已经写出来的 y 值抹掉。
+
+    小模型很爱写"把 x=0、y=e 代回原方程，求 y"——答案就这么漏了。整份计划
+    打回重来代价太大（本地一次拆题十几秒），而且下一轮它还会这么写。这里
+    只摘掉那一小段，句子仍然读得通，学生该算的还是得算。
+    """
+    if is_last:
+        return q                      # 终值节点本来就要用到 y 的值
+    y0 = truth.get("y0")
+    if y0 is None:
+        return q
+    forms = [f for f in (truth.get("y0_s") or "", mathcheck.pretty(y0)) if f]
+    out = q
+    for f in forms:
+        out = re.sub(rf"[、,，]?\s*y\s*[=＝]\s*{re.escape(f)}(?![A-Za-z0-9])", "", out,
+                     flags=re.I)
+    return re.sub(r"[、,，]\s*[，,]", "，", out)
+
+
+def _leak_issues(nodes: list[dict], truth: dict) -> list[str]:
+    """问句里不许把演算过程或答案写出来——写出来学生就没得算了。"""
+    issues: list[str] = []
+    eq = re.sub(r"\s+", "", truth.get("eq") or "")
+    y0 = truth.get("y0")
+    # y 的值可能被模型写成 e 或 SymPy 的 E，两种都算泄漏
+    forms = [f for f in (str(truth.get("y0_s") or ""),
+                         mathcheck.pretty(y0) if y0 is not None else "") if f]
+    for n in nodes:
+        q = n.get("question") or ""
+        rest = re.sub(r"\s+", "", q)
+        if eq:
+            rest = rest.replace(eq, "")
+        if _ASSIGN_CALC.search(rest) or re.search(r"[=＝]", _SUBST.sub("", rest)):
+            issues.append(f"第 {n['n']} 句里写了等式/演算过程，等于把答案先说了")
+        # y 的值一旦在问句里出现，这一段就白问了；终值节点除外（那时 y 已经求过）
+        if n["n"] < nodes[-1]["n"] and forms:
+            for f in forms:
+                if len(f) == 1:
+                    hit = re.search(rf"(?<![A-Za-z])[{f.lower()}{f.upper()}](?![A-Za-z])", rest)
+                else:
+                    hit = f in rest
+                if hit:
+                    issues.append(f"第 {n['n']} 句里已经写出了 y 的值 {f}，学生没得算")
+                    break
+    return issues
+
+
+def _implicit_issues(nodes: list[dict], truth: dict) -> list[str]:
+    """隐函数题的每一步都得算对，最后一步还得是最初要求的那个量。"""
+    if not nodes:
+        return ["一个节点都没有"]
+    issues: list[str] = []
+    deriv_hit = dy_hit = 0
+    deriv_at = None
+    y0_nodes: list[int] = []
+    for n in nodes:
+        exp = n.get("expect") or ""
+        kinds, bad = _node_kinds(exp, truth, n.get("question") or "")
+        if bad:
+            issues.append(f"第 {n['n']} 步的求导结果算错了，和符号引擎对不上")
+        elif kinds:
+            if "dy" in kinds:
+                dy_hit += 1
+            if kinds & {"eq", "term"}:
+                deriv_hit += 1
+                deriv_at = deriv_at or n["n"]
+        elif mathcheck.same_equation_ok(exp, truth) and not _DERIV_MARK.search(exp):
+            issues.append(f"第 {n['n']} 步的答案还是原方程本身，没有做任何计算")
+        v = _value_of(n)
+        if v is not None and mathcheck.same(v, truth["y0"]):
+            y0_nodes.append(n["n"])
+
+    if not deriv_hit:
+        issues.append("缺少「对两边求导」这一步（完整等式或逐项导数都行）")
+    if not dy_hit:
+        issues.append("缺少「解出 y'」这一步")
+    if not y0_nodes:
+        issues.append(f"缺少「把 x={truth['x0_s']} 代回原方程求 y」这一步，或求出的 y 值不对")
+    if deriv_at and y0_nodes and min(y0_nodes) < deriv_at:
+        issues.append("求 y 的那一步排在了「两边求导」前面，顺序不对")
+
+    last = nodes[-1]
+    q = (last.get("question") or "").replace(" ", "").lower()
+    if not ("dy/dx" in q or "y'" in q or "y′" in q):
+        issues.append("最后一个节点没有问出题目要求的 dy/dx")
+    else:
+        v = _value_of(last)
+        if v is None:
+            issues.append("最后一个节点没给出能比对的答案")
+        elif not mathcheck.same(v, truth["value"]):
+            issues.append(f"最后一个节点的答案算错了（正确结果是 {truth['value_s']}）")
+    return issues + _leak_issues(nodes, truth)
+
+
+def plan_issues(nodes: list[dict], truth: dict | None = None) -> list[str]:
+    """这份计划有什么硬伤。空列表 = 可以发给学生。"""
+    issues: list[str] = []
+    for n in nodes:
+        q = n["question"]
+        marks = q.count("？") + q.count("?")
+        if marks > 1:
+            issues.append(f"第 {n['n']} 句里塞了 {marks} 个问题，一步只问一件事")
+        exp = n.get("expect") or ""
+        if not exp.strip():
+            issues.append(f"第 {n['n']} 个节点没写「答」，判定时无从对照")
+        elif _BAD_EXPECT.search(exp):
+            # 实测模型把「答」写成"e^2-0+1=2≠1，此处需重新检查：其实……"这种
+            # 自相矛盾的独白。这种答案没法判、也不能给学生看，必须打回重写。
+            # 注意别按长度卡：带完整推导的长答案本身是可以用的
+            issues.append(f"第 {n['n']} 个节点的「答」不是干净的结果"
+                          "（混进了推导过程或自我怀疑的话），只写最终那个数或式子")
+    if truth:
+        issues += _implicit_issues(nodes, truth)
+    return issues
+
+
+def _implicit_meta(meta: dict) -> dict:
+    return {
+        "题型": meta.get("题型") or "隐函数求导",
+        "知识点": meta.get("知识点") or ["链式法则", "隐函数求导"],
+        "难度": meta.get("难度") or "中等",
+    }
+
+
+def _implicit_skeleton(truth: dict) -> list[dict]:
+    """符号引擎担保的骨架：模型两次都没拆对时用它，宁可朴素，不可教错。"""
+    x0, y0s, vs = truth["x0_s"], truth["y0_s"], truth["value_s"]
+    # 问句是给学生看的：用学生写法（e 而不是 SymPy 的 E）；
+    # 「答」保留 SymPy 形式，判定层两种写法都认
+    y0_show = mathcheck.pretty(truth["y0"])
+    raw = [
+        ("把方程两边同时对 x 求导（y 是 y(x)，含 y 的项求导后要乘一个 y'）。求导后的等式是什么？",
+         truth["G_s"] + " = 0", "", "链式法则"),
+        ("把含 y' 的项归到一边、解出 y'（用 x 和 y 表示），y' 等于什么？",
+         "y' = " + truth["dy_s"], "", "隐函数求导"),
+        (f"把 x={x0} 代回原方程，这时 y 等于几？", y0s, y0s, "方程求解"),
+        (f"把 x={x0}、y={y0_show} 代进 y' 的表达式，dy/dx 等于几？", vs, vs, "代入求值"),
+    ]
+    nodes = []
+    for i, (q, a, num, kp) in enumerate(raw, start=1):
+        nodes.append({
+            "n": i,
+            "stage": _STAGES[min(i - 1, len(_STAGES) - 1)],
+            "knowledge": kp,
+            "question": q,
+            "expect": a,
+            "numeric": mathcheck.clean_numeric(num) if num else "",
+            "answers": [a],
+            "partial_kw": [],
+            "correct_reply": "",
+            "partial_hint": "",
+            "hints": [],
+        })
+    return nodes
+
+
 def cloud_plan(problem: str, cancel=None) -> dict:
     budget = _plan_budget()
-    system = PLAN_SYSTEM
-    user = f"题目：\n{problem}"
+    # 隐函数求导这类题先由符号引擎算出真相：既当拆题的隐藏参考，也当校验的尺子。
+    # 算不出来（不是这类题）就返回 None，后面一切照旧
+    truth = _truth_of(problem)
+    system = PLAN_SYSTEM + (_IMPLICIT_RULES if truth else "")
+    user = f"题目：\n{problem}" + (_implicit_hint(truth) if truth else "")
 
-    data = raw_nodes = None
+    def bail(reason: str, err: Exception | None = None):
+        """模型彻底指望不上时：有符号真值就走骨架，没有就把错误原样抛出去。"""
+        if truth:
+            log.warning("隐函数拆题改用符号骨架（%s）", reason[:120])
+            return _pack(_implicit_skeleton(truth), _implicit_meta({}), truth)
+        raise err if err is not None else ValueError(f"计划生成失败：{reason}")
+
     meta = {"题型": "", "知识点": [], "难度": ""}
     last_nodes: list[dict] = []
-    # 小模型经常混进个别废节点。过半合格就直接用、剔掉废节点（重试一次
-    # 本地要多等几分钟，能不重试就不重试）；过半是废的才带着罪名重试一次。
+    issues: list[str] = []
+    # 小模型经常混进个别废节点。合格就直接用；有硬伤（含数学算错）才带上
+    # 整改清单重试一次——本地重试一次要多等几分钟，能不重试就不重试。
     for attempt in range(2):
         try:
             # 不设 max_tokens：实测这类小模型先写上千 token 的 reasoning 再出正文，
@@ -304,13 +707,13 @@ def cloud_plan(problem: str, cancel=None) -> dict:
             # 脱缰输出靠超时和降级兜底，不靠砍预算。
             data = llm.chat_json(system, user, cancel=cancel)
         except llm.LLMError as e:
-            # 整段 JSON 救不回来时，退回"按字段名捞问句"
             raw_text = str(e)
             if "JSON" not in raw_text:
-                raise
+                return bail(raw_text, e)
+            # 整段 JSON 救不回来时，退回"按字段名捞问句"
             salvaged = _salvage_last_reply()
             if not salvaged:
-                raise
+                return bail(raw_text, e)
             raw_nodes, meta = salvaged, {"题型": "", "知识点": [], "难度": ""}
         else:
             raw_nodes = (data.get("节点") or data.get("节点计划") or data.get("nodes")
@@ -319,13 +722,25 @@ def cloud_plan(problem: str, cancel=None) -> dict:
                     "难度": data.get("难度", "")}
         last_nodes = _build_nodes(raw_nodes, meta, budget)
         good = [n for n in last_nodes if _real_question(n["question"])]
-        if good and len(good) * 2 >= len(last_nodes):
-            return _pack_plan(_renumber(good), meta)
+        if not good:
+            issues = ["一个能直接作答的节点都没有：全是流程反问、非问句或教师视角的备注"]
+        else:
+            issues = ([] if len(good) * 2 >= len(last_nodes)
+                      else ["节点里混着不能作答的废节点（流程反问 / 不是问句 / 教师备注）"])
+            nodes = _renumber(good)
+            if truth:
+                last_n = nodes[-1]["n"]
+                for n in nodes:
+                    n["question"] = _scrub_leak(n["question"], truth, n["n"] == last_n)
+            issues += plan_issues(nodes, truth)
+            if not issues:
+                return _pack(nodes, meta, truth)
         if attempt == 0:
-            system += ('\n\n你上一次输出的节点不合格：出现了流程性反问（如「你想…吗」「然后呢」）、'
-                       '不是问句、或教师视角的备注。每个「问」必须是学生能直接作答的具体数学问题，'
-                       '以问号结尾，包含作答所需的全部信息。重新输出全部节点。')
+            system += _issue_feedback(issues)
 
+    if truth:
+        log.warning("隐函数拆题两次未过校验（%s），改用符号骨架", "；".join(issues)[:150])
+        return _pack(_implicit_skeleton(truth), _implicit_meta(meta), truth)
     # 重试仍有废节点：能剔就剔，一个不剩也只能硬着头皮用（判定层有关键词兜底）
     good = [n for n in last_nodes if _real_question(n["question"])]
     nodes = _renumber(good) if good else last_nodes
@@ -349,6 +764,15 @@ def _pack_plan(nodes: list[dict], meta: dict) -> dict:
         "难度": meta.get("难度", ""),
         "nodes": nodes,
     }
+
+
+def _pack(nodes: list[dict], meta: dict, truth: dict | None = None) -> dict:
+    """打包成计划。有符号真值时顺手把标准答案留给服务端报告页
+    （以前自定义题的报告里这一格只能显示"—"）。"""
+    plan = _pack_plan(nodes, meta)
+    if truth is not None:
+        plan["_answer_latex"] = mathcheck.latex(truth["value"])
+    return plan
 
 
 def _salvage_last_reply() -> list[dict]:
@@ -536,6 +960,19 @@ class Engine:
         stage = node["stage"]
         log.info("会话 %s 节点 %d 判定 %s", sess.id, node["n"], verdict)
 
+        # 表达式答案没有数值可抽，只能听判定模型的——2B 级模型会把完全正确的
+        # 式子判成错（实测把 e-e³ 判 wrong，学生于是被反复重问同一句）。
+        # 符号引擎能对上的直接翻成 correct：对错由算力说话，不由小模型说话
+        if verdict != "correct" and symbolic_accepts(target, text, _truth_of(sess.problem)):
+            log.info("会话 %s 节点 %d 判定被符号层翻正", sess.id, node["n"])
+            verdict, reply = "correct", "对，就是这样。"
+
+        # 判定说错、话术却在肯定（实测：符号答案 e-e³ 被数值闸抽残翻成
+        # wrong，reply 却是"对，就是这样"）——学生被夸完再被重问同一句，
+        # 永远走不到终点。以判定为准：肯定话术丢弃，走标准纠错路径。
+        if verdict != "correct" and reply and _AFFIRM_REPLY.search(reply):
+            reply = ""
+
         # 每轮的 SymPy 核对结果不再显示：对了是废话，错了等于报答案。
         # 符号引擎的验证力放两处更合适——报告页的变式题标准答案，与测试用例。
         note = ""
@@ -582,8 +1019,7 @@ class Engine:
                 sess.followup_done = True
                 reply = node["correct_reply"] + "\n\n" + followup["question"]
             else:
-                if not reply:
-                    reply = followup["reply"] if in_followup else node["correct_reply"]
+                reply = _affirm(reply, node, followup["reply"] if in_followup else "")
                 reply = advance(reply)
         else:
             sess.node_wrong += 1
@@ -621,6 +1057,9 @@ class Engine:
                         reply = hint_for(node, 0)
 
         sess.log("assistant", reply, stage=stage, node=min(sess.node_idx + 1, len(sess.nodes)))
+
+        if next_action == "self_assessment":
+            _prefetch_variant(sess)   # 等学生挑分的那几秒里提前把变式题出了
 
         return {
             "message": ensure_question(reply),
@@ -688,7 +1127,10 @@ class Engine:
         prob = get_problem(sess.problem_id)
         problem, expr = _variant_fallback(sess, prob)
         ask = prob["variant"].get("ask") or "直接给出结果"
-        if llm.online() and sess.mode != "mock":
+        prefetched = _pop_variant_prefetch(sess.id)
+        if prefetched is not None:
+            problem, expr = prefetched   # 学生挑分的那几秒里已经出好了
+        elif llm.online() and sess.mode != "mock":
             try:
                 problem, expr = cloud_variant(sess)
             except llm.LLMError:
@@ -715,7 +1157,7 @@ class Engine:
             "expr": expr,
             "ask": ask,
             "answer_latex": mathcheck.latex(answer) if answer is not None else "?",
-            "answer_plain": mathcheck.plain(answer) if answer is not None else "?",
+            "answer_plain": mathcheck.pretty(answer) if answer is not None else "?",
         }
         log.info("会话 %s 变式题 · expr=%s · verified=%s",
                  sess.id, expr[:60], answer is not None)
@@ -726,12 +1168,10 @@ class Engine:
         if not sess.variant:
             return {"error": "还没有出变式题"}
         want = mathcheck.evaluate(sess.variant["expr"])
-        if want is not None and getattr(want, "free_symbols", set()):
-            # 标准答案是表达式（导函数这类）：把学生输入整体当表达式解析后
-            # 符号比对（same() 会先化简、证不出再代点抽查）。
-            # 以前只会抽数字——学生答 4x**3 会被抽出个 3 来比，必错
-            got = mathcheck.parse_student_expr(text)
-        else:
+        # 先整式解析，再退回抽数字：标准答案可能是 e²−e⁶ 这种常数式，
+        # 只抽数字会把 "exp(2)-exp(6)" 抽成 2，学生答对也判错
+        got = mathcheck.parse_student_expr(text)
+        if got is None:
             got = mathcheck.number_in(text)
         # SymPy 解析不出来（语音输入的分段描述最典型："x大于零时是五倍x四次方，
         # x小于零时是负5倍x的四次方"）且在线：让模型**只做翻译**，把学生的回答
@@ -883,6 +1323,44 @@ class Engine:
         }
 
 
+# ---------------------------------------------------------- 变式题预生成
+# 学生在自评面板挑分的那几秒，正好够云端出变式题——最后一节点答完的瞬间
+# 就后台开跑，自评提交时变式题已经在手，页面零等待。
+class _VariantPrefetch:
+    __slots__ = ("event", "value")
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.value = None
+
+
+_PREFETCH: dict[str, _VariantPrefetch] = {}
+
+
+def _prefetch_variant(sess: Session) -> None:
+    if sess.id in _PREFETCH or not (llm.online() and sess.mode != "mock"):
+        return
+    pf = _VariantPrefetch()
+    _PREFETCH[sess.id] = pf
+
+    def _work():
+        try:
+            pf.value = cloud_variant(sess)   # 内含校验与同型关卡，失败给 None
+        except Exception:
+            pf.value = None
+        pf.event.set()
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def _pop_variant_prefetch(sid: str):
+    pf = _PREFETCH.pop(sid, None)
+    if pf is None:
+        return None
+    pf.event.wait(timeout=90)    # 还没出完就等它——和同步生成同价，不吃亏
+    return pf.value
+
+
 def _limit_marker(t: str) -> bool:
     """题面是不是极限题——变式题同型关卡用的判定标记。"""
     t = (t or "").lower()
@@ -958,6 +1436,12 @@ def cloud_variant(sess: Session) -> tuple[str, str]:
         data = llm.chat_json(system, user + extra)
         problem = (data.get("题目") or "").strip()
         expr = _clean_variant_expr(data.get("sympy表达式") or "")
+        # 隐函数求导的变式：答案由符号引擎按新题面现算，不采信模型的估计。
+        # 实测模型把 xy^2-ln(x+1)+ln y=0 的答案写成 1-e^-1，真值是 0——
+        # 标准答案错了，学生答对也会被判错
+        truth = mathcheck.implicit_derivative(problem)
+        if truth is not None:
+            expr = truth["value_s"]
         # 小模型会把提示词里的占位符原样抄回来（实测输出过字面的"LaTeX题目"），
         # 题面不像人话就整体回退内置变式题
         if (_PLACEHOLDER.search(problem) or len(problem) < 12
