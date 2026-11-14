@@ -40,3 +40,8 @@ htmlcov/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 记录
+对话.md
+架构分析与改动指南.md
+框架大纲.md
